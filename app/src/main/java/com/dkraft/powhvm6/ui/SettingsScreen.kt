@@ -26,6 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.dkraft.powhvm6.HostAddr
 import com.dkraft.powhvm6.MainViewModel
 import com.dkraft.powhvm6.Settings
 
@@ -47,6 +48,7 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                         value = hostText,
                         onValueChange = { hostText = it.trim() },
                         label = { Text("IP address or hostname") },
+                        placeholder = { Text("10.0.0.69 (port defaults to 8088)") },
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Uri),
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
@@ -54,9 +56,8 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = {
-                            hostText = hostText.trim()
+                            hostText = HostAddr.normalize(hostText)
                             if (hostText.isNotEmpty()) {
-                                vm.settings.host = hostText
                                 vm.startPolling(hostText)
                             }
                         }) { Text("Connect") }

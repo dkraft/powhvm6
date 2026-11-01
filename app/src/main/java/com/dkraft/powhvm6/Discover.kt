@@ -39,7 +39,7 @@ object Discover {
             } catch (e: java.net.SocketTimeoutException) {
                 return null
             }
-            val ip = pkt.address.hostAddress
+            val ip = pkt.address.hostAddress ?: return null
             return parse(String(pkt.data, 0, pkt.length))?.copy(ip = ip)
         } catch (e: Exception) {
             return null
@@ -48,9 +48,9 @@ object Discover {
         }
     }
 
-    /** Scan a whole /24 in parallel. */
+    /** Scan a whole /24 in parallel. [prefix] is the first three octets, e.g. "10.0.0". */
     fun scanSubnet(prefix: String, timeoutMs: Long = 2500): List<Found> {
-        val base = prefix.substringBeforeLast(".")
+        val base = prefix.trimEnd('.')
         val results = java.util.Collections.synchronizedList(mutableListOf<Found>())
         val pool = Executors.newFixedThreadPool(32)
         val latch = CountDownLatch(254)
@@ -95,7 +95,7 @@ object Discover {
                 ip = "",
                 name = o.optString("name"),
                 model = o.optString("model"),
-                httpPort = o.optInt("http_port", 8088)
+                httpPort = o.optInt("http_port", HostAddr.DEFAULT_PORT)
             )
         } catch (e: Exception) {
             null

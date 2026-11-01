@@ -8,8 +8,8 @@ class Settings(private val ctx: Context) {
         ctx.getSharedPreferences("powhvm6", Context.MODE_PRIVATE)
 
     var host: String
-        get() = prefs.getString("host", "") ?: ""
-        set(v) = prefs.edit().putString("host", v).apply()
+        get() = HostAddr.normalize(prefs.getString("host", "") ?: "")
+        set(v) = prefs.edit().putString("host", HostAddr.normalize(v)).apply()
 
     var nightMode: Boolean
         get() = prefs.getBoolean("night", false)

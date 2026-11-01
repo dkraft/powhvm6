@@ -29,7 +29,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private var pollJob: Job? = null
 
-    fun startPolling(host: String) {
+    init {
+        // Resume polling the saved Pi after an app restart.
+        val saved = settings.host
+        if (saved.isNotEmpty()) startPolling(saved)
+    }
+
+    fun startPolling(input: String) {
+        val host = HostAddr.normalize(input)
+        if (host.isEmpty()) return
         settings.host = host
         snapshot = null
         error = null
@@ -61,9 +69,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val out = mutableListOf<Found>()
                 Discover.broadcast()?.let { out.add(it) }
                 if (out.isEmpty()) {
-                    val prefix = settings.host.substringBeforeLast(".")
-                        .ifEmpty { "10.0.0" }
-                    Discover.scanSubnet(prefix)?.let { out.addAll(it) }
+                    val ip = HostAddr.hostOnly(settings.host)
+                    val prefix = if (Regex("""^\d+\.\d+\.\d+\.\d+$""").matches(ip))
+                        ip.substringBeforeLast(".") else "10.0.0"
+                    out.addAll(Discover.scanSubnet(prefix))
                 }
                 out
             }
@@ -73,7 +82,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun pickDevice(d: Found) {
-        settings.host = d.ip
-        startPolling(d.ip)
+        val port = d.httpPort.takeIf { it in 1..65535 } ?: HostAddr.DEFAULT_PORT
+        startPolling("${d.ip}:$port")
     }
 }
