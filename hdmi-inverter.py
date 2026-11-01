@@ -11,11 +11,15 @@ green while the battery is charging, red while it is discharging, and
 cyan while it is doing neither. Charge mins and disch mins count time
 in those states since this screen started.
 """
+import json
 import math
 import shutil
+import socket
 import sys
+import threading
 import time
 from collections import deque
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import serial
 
@@ -28,6 +32,9 @@ BLOCK2 = (4546, 16)
 AGE_MIN = 2.0
 AGE_MAX = 24 * 3600.0
 HISTORY_KEEP = 50000
+HTTP_PORT = 8088
+DISCOVER_PORT = 28776
+DISCOVER_MAGIC = b"powhvm6-discover"
 
 # Linux console colors. Cyan is idle so green and red stay unambiguous.
 CYAN = "\033[36m"
@@ -96,6 +103,9 @@ class Field:
         self.block = block
         self.fmt = fmt
         self.value = "—"
+        self.number = None
+        self.group = "other"
+        self.fid = label.lower().replace(" ", "_")
 
     def cell(self, width: int) -> str:
         text = f"{self.label:<12} {self.value:>16}"
@@ -105,55 +115,103 @@ class Field:
 
 
 def volts(i):
-    return lambda regs: f"{regs[i] / 10:.1f} V"
+    def fmt(regs):
+        number = regs[i] / 10.0
+        return f"{number:.1f} V", number
+
+    return fmt
 
 
 def hertz(i):
-    return lambda regs: f"{regs[i] / 10:.1f} Hz"
+    def fmt(regs):
+        number = regs[i] / 10.0
+        return f"{number:.1f} Hz", number
+
+    return fmt
 
 
 def watts(i):
-    return lambda regs: f"{regs[i]} W"
+    def fmt(regs):
+        number = float(regs[i])
+        return f"{regs[i]} W", number
+
+    return fmt
 
 
 def amps(i):
-    return lambda regs: f"{regs[i]} A"
+    def fmt(regs):
+        number = float(regs[i])
+        return f"{regs[i]} A", number
+
+    return fmt
 
 
 def percent(i):
-    return lambda regs: f"{regs[i]} %"
+    def fmt(regs):
+        number = float(regs[i])
+        return f"{regs[i]} %", number
+
+    return fmt
 
 
 def fault(regs):
-    return "none" if regs[29] == 0 else str(regs[29])
+    return ("none" if regs[29] == 0 else str(regs[29]), regs[29] or None)
 
 
 def output_mode(regs):
-    return {0: "Utility first", 1: "Solar first", 2: "SBU"}.get(regs[36], str(regs[36]))
+    return (
+        {0: "Utility first", 1: "Solar first", 2: "SBU"}.get(regs[36], str(regs[36])),
+        regs[36],
+    )
 
 
 def charge_mode(regs):
-    return {
-        0: "Utility first",
-        1: "Solar first",
-        2: "Solar+utility",
-        3: "Solar only",
-    }.get(regs[35], str(regs[35]))
+    return (
+        {
+            0: "Utility first",
+            1: "Solar first",
+            2: "Solar+utility",
+            3: "Solar only",
+        }.get(regs[35], str(regs[35])),
+        regs[35],
+    )
 
 
 def ac_range(regs):
-    return {0: "Appliances", 1: "UPS"}.get(regs[37], str(regs[37]))
+    return (
+        {0: "Appliances", 1: "UPS"}.get(regs[37], str(regs[37])),
+        regs[37],
+    )
 
 
 def target_hz(regs):
-    return {0: "50 Hz", 1: "60 Hz"}.get(regs[39], str(regs[39]))
+    value = regs[39]
+    text = {0: "50 Hz", 1: "60 Hz"}.get(value, str(value))
+    number = {0: 50.0, 1: 60.0}.get(value)
+    return text, number
 
 
 def heatsink(regs):
     v = regs[11]
-    if 0 <= v <= 125:
-        return f"{v} C"
-    return f"raw {v}"
+    text = f"{v} C" if 0 <= v <= 125 else f"raw {v}"
+    number = float(v) if 0 <= v <= 125 else None
+    return text, number
+
+
+def eq_minutes(i):
+    def fmt(regs):
+        number = float(regs[i])
+        return f"{regs[i]} min", number
+
+    return fmt
+
+
+def eq_days(i):
+    def fmt(regs):
+        number = float(regs[i])
+        return f"{regs[i]} days", number
+
+    return fmt
 
 
 # block 0 indexes are relative to 4501. block 1 indexes are relative to 4546.
@@ -179,7 +237,7 @@ COLUMNS = [
         Field("Output mode", 0, output_mode),
         Field("Charge mode", 0, charge_mode),
         Field("AC range", 0, ac_range),
-        Field("Target V", 0, lambda regs: f"{regs[41]} V"),
+        Field("Target V", 0, lambda regs: (f"{regs[41]} V", float(regs[41]))),
         Field("Target Hz", 0, target_hz),
         Field("Max charge", 0, amps(40)),
         Field("AC chg max", 0, amps(42)),
@@ -192,12 +250,48 @@ COLUMNS = [
         Field("Float", 1, volts(1)),
         Field("Low cutoff", 1, volts(2)),
         Field("Equalize", 1, volts(3)),
-        Field("Eq time", 1, lambda regs: f"{regs[4]} min"),
-        Field("Eq timeout", 1, lambda regs: f"{regs[5]} min"),
-        Field("Eq every", 1, lambda regs: f"{regs[6]} days"),
+        Field("Eq time", 1, eq_minutes(4)),
+        Field("Eq timeout", 1, eq_minutes(5)),
+        Field("Eq every", 1, eq_days(6)),
     ],
 ]
 FIELDS = [field for column in COLUMNS for field in column]
+FIELD_GROUPS = {
+    "AC voltage": "live",
+    "AC frequency": "live",
+    "Load power": "live",
+    "Load percent": "live",
+    "Load voltage": "live",
+    "Load freq": "live",
+    "Battery": "battery",
+    "Battery SoC": "battery",
+    "Charge": "battery",
+    "Discharge": "battery",
+    "Charging": "battery",
+    "Discharging": "battery",
+    "PV voltage": "solar",
+    "PV power": "solar",
+    "Fault": "status",
+    "Output mode": "status",
+    "Charge mode": "status",
+    "AC range": "status",
+    "Heatsink": "status",
+    "Target V": "setpoints",
+    "Target Hz": "setpoints",
+    "Max charge": "setpoints",
+    "AC chg max": "setpoints",
+    "To grid": "setpoints",
+    "To battery": "setpoints",
+    "Bulk": "setpoints",
+    "Float": "setpoints",
+    "Low cutoff": "setpoints",
+    "Equalize": "setpoints",
+    "Eq time": "setpoints",
+    "Eq timeout": "setpoints",
+    "Eq every": "setpoints",
+}
+for _field in FIELDS:
+    _field.group = FIELD_GROUPS.get(_field.label, "other")
 
 
 def column_for_age(age: float, n: int):
@@ -387,9 +481,10 @@ def apply_block(block: int, regs) -> None:
         if field.block != block:
             continue
         try:
-            field.value = field.fmt(regs)
+            field.value, field.number = field.fmt(regs)
         except Exception as exc:
             field.value = str(exc)
+            field.number = None
 
 
 def close_port(ser):
@@ -433,6 +528,24 @@ class Activity:
         return f"{minutes:.0f} min"
 
 
+# Shared API state. The poll thread writes, HTTP threads read.
+history: deque = deque(maxlen=HISTORY_KEEP)
+history_lock = threading.Lock()
+api_state = {
+    "started": time.time(),
+    "lat1": None,
+    "lat2": None,
+    "drops1": 0,
+    "drops2": 0,
+    "err1": "",
+    "err2": "",
+    "last_ok": None,
+    "charge_s": 0.0,
+    "disch_s": 0.0,
+}
+api_lock = threading.Lock()
+
+
 def remember(history, regs, activity: Activity) -> None:
     now = time.monotonic()
     activity.note(now, regs[7], regs[8])
@@ -442,7 +555,147 @@ def remember(history, regs, activity: Activity) -> None:
         history.popleft()
 
 
+def snapshot_now() -> dict:
+    with api_lock:
+        lat1, drops1, err1 = api_state["lat1"], api_state["drops1"], api_state["err1"]
+        lat2, drops2, err2 = api_state["lat2"], api_state["drops2"], api_state["err2"]
+        last_ok = api_state["last_ok"]
+        charge_s = api_state["charge_s"]
+        disch_s = api_state["disch_s"]
+    link = last_ok is not None and (time.time() - last_ok) <= 10.0
+    fields = []
+    for field in FIELDS:
+        if field.label == "Charging":
+            text = Activity.fmt(charge_s)
+            number = round(charge_s / 60.0, 1)
+        elif field.label == "Discharging":
+            text = Activity.fmt(disch_s)
+            number = round(disch_s / 60.0, 1)
+        else:
+            text = field.value
+            number = field.number
+        fields.append(
+            {
+                "id": field.fid,
+                "label": field.label,
+                "group": field.group,
+                "text": text,
+                "number": number,
+            }
+        )
+    return {
+        "name": "POW-HVM6",
+        "model": "POW-HVM6.2M-48V-N",
+        "up_since": api_state["started"],
+        "link_ok": link,
+        "frames": [
+            {"latency_ms": lat1, "drops": drops1, "error": err1},
+            {"latency_ms": lat2, "drops": drops2, "error": err2},
+        ],
+        "fields": fields,
+        "history": downsample_history(),
+    }
+
+
+def downsample_history(points: int = 360) -> list[dict]:
+    """Average history into at most `points` buckets for the API."""
+    with history_lock:
+        now = time.monotonic()
+        items = list(history)
+    if not items:
+        return []
+    buckets = points
+    out = []
+    for i in range(buckets):
+        start = i * len(items) // buckets
+        end = (i + 1) * len(items) // buckets
+        if end <= start:
+            continue
+        part = items[start:end]
+        n = len(part)
+        stamp = part[-1][0]
+        pct = sum(p for _, p, _, _ in part) / n
+        charge = sum(c for _, _, c, _ in part) / n
+        discharge = sum(d for _, _, _, d in part) / n
+        state = "idle"
+        if charge > discharge and charge > 0:
+            state = "charging"
+        elif discharge > charge and discharge > 0:
+            state = "discharging"
+        out.append(
+            {
+                "age_s": round(now - stamp, 1),
+                "pct": round(pct, 1),
+                "state": state,
+            }
+        )
+    return out
+
+
+class ApiHandler(BaseHTTPRequestHandler):
+    server_version = "PowHVM6/1.0"
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _json(self, code: int, payload) -> None:
+        data = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if path == "/api/v1/now":
+            self._json(200, snapshot_now())
+        elif path == "/api/v1/identity":
+            self._json(
+                200,
+                {
+                    "name": "POW-HVM6",
+                    "model": "POW-HVM6.2M-48V-N",
+                    "http_port": HTTP_PORT,
+                },
+            )
+        elif path == "/":
+            self._json(
+                200,
+                {"name": "POW-HVM6", "endpoints": ["/api/v1/now", "/api/v1/identity"]},
+            )
+        else:
+            self._json(404, {"error": "not found"})
+
+
+def start_api() -> None:
+    server = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), ApiHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"  api on :{HTTP_PORT}, discovery on udp :{DISCOVER_PORT}", flush=True)
+
+
+def discover_reply() -> bytes:
+    return json.dumps(
+        {"name": "POW-HVM6", "model": "POW-HVM6.2M-48V-N", "http_port": HTTP_PORT}
+    ).encode()
+
+
+def discovery_thread() -> None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", DISCOVER_PORT))
+    while True:
+        data, addr = sock.recvfrom(2048)
+        if data.startswith(DISCOVER_MAGIC):
+            sock.sendto(discover_reply(), addr)
+
+
 def main() -> None:
+    start_api()
+    threading.Thread(target=discovery_thread, daemon=True).start()
     print("\033[2J\033[H\033[36;1mPOW-HVM6\033[0m\n\n  opening serial...", flush=True)
     ser = None
     err1 = "waiting"
@@ -451,7 +704,6 @@ def main() -> None:
     lat2 = None
     drops1 = 0
     drops2 = 0
-    history = deque(maxlen=HISTORY_KEEP)
     activity = Activity()
     charge_field = next(field for field in FIELDS if field.label == "Charging")
     disch_field = next(field for field in FIELDS if field.label == "Discharging")
@@ -491,6 +743,13 @@ def main() -> None:
             ser = close_port(ser)
         charge_field.value = Activity.fmt(activity.charge_s)
         disch_field.value = Activity.fmt(activity.disch_s)
+        with api_lock:
+            api_state["lat1"], api_state["drops1"], api_state["err1"] = lat1, drops1, err1
+            api_state["lat2"], api_state["drops2"], api_state["err2"] = lat2, drops2, err2
+            api_state["charge_s"] = activity.charge_s
+            api_state["disch_s"] = activity.disch_s
+            if not err1:
+                api_state["last_ok"] = time.time()
         size = shutil.get_terminal_size((126, 34))
         # No trailing newline: a full pane plus print()'s newline scrolls
         # the title off the top of the HDMI console.
