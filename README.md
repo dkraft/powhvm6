@@ -33,6 +33,8 @@ The same process that owns the serial port also runs an HTTP server and a UDP di
 |---|---|
 | `GET http://<ip>:8088/api/v1/now` | Live snapshot: all 32 fields (id, label, group, text, number), frame latency/drops, link status, 360-point load-% history |
 | `GET http://<ip>:8088/api/v1/identity` | Name, model, HTTP port |
+| `GET http://<ip>:8088/api/v1/settings` | Writable settings registry: definitions, current values, allowed options, read-only diagnostics |
+| `POST http://<ip>:8088/api/v1/set` | Change one registry setting: `{"key": "...", "value": N}` (JSON only). Validated, written, read back. See [SETTINGS.md](SETTINGS.md) |
 | UDP port 28776 | Discovery. Send `powhvm6-discover`, get back JSON with the HTTP port |
 
 All endpoints are CORS-enabled (`Access-Control-Allow-Origin: *`) so a browser or web app can read them directly.

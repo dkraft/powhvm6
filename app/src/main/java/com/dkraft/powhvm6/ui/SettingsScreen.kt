@@ -1,5 +1,6 @@
 package com.dkraft.powhvm6.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -68,6 +69,36 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                         }) { Text("Connect") }
                         TextButton(onClick = { vm.search() }) { Text("Search LAN") }
                     }
+                }
+            }
+        }
+
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Inverter settings", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Values the Pi can change on the inverter. Each change is confirmed and read back.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    val msg = vm.settingsMessage
+                    if (msg != null) Text(msg, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                    for (d in vm.settingDefs) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth()
+                                .then(if (d.enabled) Modifier.clickable { vm.beginEdit(key = d.key) } else Modifier)
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(d.label, style = MaterialTheme.typography.bodyLarge)
+                                if (!d.enabled) Text("read-only", style = MaterialTheme.typography.labelSmall)
+                            }
+                            Text(d.labelFor(d.current), style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                    TextButton(onClick = { vm.loadSettings() }) { Text("Refresh") }
                 }
             }
         }

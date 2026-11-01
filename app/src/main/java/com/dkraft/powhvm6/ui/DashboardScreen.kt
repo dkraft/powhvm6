@@ -1,6 +1,10 @@
 package com.dkraft.powhvm6.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.Icon
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,6 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -72,6 +77,8 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val groups = linkedMapOf<String, MutableList<Field>>()
     for (f in visible) groups.getOrPut(f.group) { mutableListOf() }.add(f)
 
+    val editable = vm.editableFieldIds()
+
     LazyColumn(
         modifier = modifier,
         contentPadding = PaddingValues(16.dp),
@@ -111,7 +118,7 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         }
 
         for ((groupName, fields) in groups) {
-            item { GroupCard(groupName, fields) }
+            item { GroupCard(groupName, fields, editable, onEdit = { vm.beginEdit(fieldId = it) }) }
         }
 
         if (snap.history.isNotEmpty()) {
@@ -121,7 +128,12 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun GroupCard(groupName: String, fields: List<Field>) {
+fun GroupCard(
+    groupName: String,
+    fields: List<Field>,
+    editable: Set<String> = emptySet(),
+    onEdit: (String) -> Unit = {}
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -140,8 +152,8 @@ fun GroupCard(groupName: String, fields: List<Field>) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     val left = fields.getOrNull(r)
                     val right = fields.getOrNull(r + fields.size / 2)
-                    FieldCell(left, modifier = Modifier.weight(1f))
-                    if (right != null) FieldCell(right, modifier = Modifier.weight(1f))
+                    FieldCell(left, modifier = Modifier.weight(1f), editable = left?.id in editable, onEdit = onEdit)
+                    if (right != null) FieldCell(right, modifier = Modifier.weight(1f), editable = right.id in editable, onEdit = onEdit)
                     else Spacer(Modifier.weight(1f))
                 }
             }
@@ -150,10 +162,17 @@ fun GroupCard(groupName: String, fields: List<Field>) {
 }
 
 @Composable
-fun FieldCell(field: Field?, modifier: Modifier = Modifier) {
+fun FieldCell(
+    field: Field?,
+    modifier: Modifier = Modifier,
+    editable: Boolean = false,
+    onEdit: (String) -> Unit = {}
+) {
     if (field == null) return
     Row(
         modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .then(if (editable) Modifier.clickable { onEdit(field.id) } else Modifier)
             .background(
                 MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
                 RoundedCornerShape(8.dp)
@@ -180,6 +199,14 @@ fun FieldCell(field: Field?, modifier: Modifier = Modifier) {
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                 )
             }
+        }
+        if (editable) {
+            Icon(
+                Icons.Default.Edit,
+                contentDescription = "Edit ${field.label}",
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
         }
     }
 }

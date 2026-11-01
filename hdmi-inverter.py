@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Live POW-HVM6 readout for the HDMI console. Read-only Modbus.
+"""Live POW-HVM6 readout for the HDMI console, plus a small LAN API.
+
+Monitoring is read-only Modbus. The only writes are the settings listed
+in SETTINGS below, sent through POST /api/v1/set (see SETTINGS.md).
 
 The official Wi-Fi dongle polls two holding-register blocks on slave 5
 at 2400 8N1: 45 registers at 4501, then 16 registers at 4546.
@@ -13,6 +16,8 @@ in those states since this screen started.
 """
 import json
 import math
+import os
+import queue
 import shutil
 import socket
 import sys
@@ -35,6 +40,10 @@ HISTORY_KEEP = 50000
 HTTP_PORT = 8088
 DISCOVER_PORT = 28776
 DISCOVER_MAGIC = b"powhvm6-discover"
+MODEL = "POW-HVM6.2M-48V-N"
+# Set to False to turn POST /api/v1/set off without touching the registry.
+WRITES_ENABLED = True
+API_VERSION = 2
 
 # Linux console colors. Cyan is idle so green and red stay unambiguous.
 CYAN = "\033[36m"
@@ -95,6 +104,67 @@ def read_regs(ser, start: int, count: int) -> list[int]:
     if len(data) < count * 2:
         raise TimeoutError("short reply")
     return [data[i] | (data[i + 1] << 8) for i in range(0, count * 2, 2)]
+
+
+def await_reply(ser, need_fn, timeout=1.5) -> bytes:
+    buf = b""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        n = ser.in_waiting
+        if n:
+            buf += ser.read(n)
+            need = need_fn(buf)
+            if need is not None and len(buf) >= need:
+                break
+        else:
+            time.sleep(0.02)
+    return buf
+
+
+def write_reg(ser, register: int, value: int) -> dict:
+    """Modbus function 06 (write single register). Returns ack/exception info.
+
+    Settings registers (50xx) take a normal big-endian word, unlike the
+    little-endian words the 45xx monitoring block returns.
+    """
+    if not (0 <= value <= 0xFFFF):
+        raise ValueError("value out of 16-bit range")
+    pdu = bytes(
+        (
+            SLAVE,
+            6,
+            (register >> 8) & 0xFF,
+            register & 0xFF,
+            (value >> 8) & 0xFF,
+            value & 0xFF,
+        )
+    )
+    frame = pdu + crc(pdu)
+    ser.reset_input_buffer()
+    ser.write(frame)
+    ser.flush()
+
+    def need(buf):
+        if len(buf) >= 2 and buf[1] == 0x86:
+            return 5
+        if len(buf) >= 2:
+            return 8
+        return None
+
+    buf = await_reply(ser, need)
+    if len(buf) >= 5 and buf[0] == SLAVE and buf[1] == 0x86:
+        if crc(buf[:3]) != buf[3:5]:
+            return {"ack": False, "error": "bad crc on exception reply"}
+        code = buf[2]
+        names = {1: "illegal function", 2: "illegal address", 3: "illegal value", 4: "device failure"}
+        return {"ack": False, "exception": code, "error": f"inverter NAK: {names.get(code, 'code ' + str(code))}"}
+    if len(buf) < 8:
+        return {"ack": False, "error": "no reply" if not buf else f"short reply {buf.hex()}"}
+    if crc(buf[:6]) != buf[6:8]:
+        return {"ack": False, "error": "bad crc"}
+    if buf[:6] != pdu:
+        return {"ack": False, "error": f"unexpected echo {buf[:8].hex()}"}
+    return {"ack": True}
 
 
 class Field:
@@ -292,6 +362,251 @@ FIELD_GROUPS = {
 }
 for _field in FIELDS:
     _field.group = FIELD_GROUPS.get(_field.label, "other")
+
+
+# ---------------------------------------------------------------------------
+# Writable settings registry. Adding a setting is one entry here; the API and
+# the Android app pick it up automatically. See SETTINGS.md.
+#
+#   key         stable id used by POST /api/v1/set
+#   label/unit  shown in the app editor
+#   field_id    dashboard field this setting edits (Field.fid), or None
+#   menu        inverter LCD program number, for reference
+#   write       Modbus write: function 6 to `register`, raw = value * scale
+#   read        where the current value comes from: (block, index) in the
+#               polled blocks, decoded as raw / scale
+#   validation  exactly one of:
+#                 {"type": "options", "values": [..]}        numeric list
+#                 {"type": "range", "min": a, "max": b, "step": s}
+#                 {"type": "enum", "options": {raw_int: "label", ..}}
+#   enabled     False keeps it listed but refuses writes
+#   note        optional hint shown in the editor
+# Allowed values below are the LCD options in the POW-HVM3.6/4.2/6.2M-N
+# manual (V1.3.0514) for the 6.2 kW 48 V model.
+# ---------------------------------------------------------------------------
+SETTINGS = [
+    {
+        "key": "max_charge_current",
+        "label": "Max charge",
+        "description": "Maximum total charging current (solar + utility)",
+        "unit": "A",
+        "field_id": "max_charge",
+        "menu": 2,
+        "write": {"function": 6, "register": 5022, "scale": 1},
+        "read": {"block": 0, "index": 40, "scale": 1},
+        "validation": {"type": "range", "min": 10, "max": 120, "step": 10},
+        "enabled": True,
+        "note": "Must be at least the AC max charge; set below your battery/BMS limit.",
+    },
+    {
+        "key": "max_ac_charge_current",
+        "label": "AC chg max",
+        "description": "Maximum utility (AC) charging current",
+        "unit": "A",
+        "field_id": "ac_chg_max",
+        "menu": 11,
+        "write": {"function": 6, "register": 5024, "scale": 1},
+        "read": {"block": 0, "index": 42, "scale": 1},
+        "validation": {"type": "options", "values": [2, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]},
+        "enabled": True,
+        "note": "If Max charge is lower, the inverter uses Max charge for AC charging.",
+    },
+]
+SETTINGS_BY_KEY = {s["key"]: s for s in SETTINGS}
+
+# Latest raw register blocks, kept for settings reads.
+last_blocks = {0: None, 1: None}
+
+
+def allowed_values(setting) -> list:
+    v = setting["validation"]
+    if v["type"] == "options":
+        return list(v["values"])
+    if v["type"] == "range":
+        out, x = [], v["min"]
+        while x <= v["max"] + 1e-9:
+            out.append(round(x, 4))
+            x += v["step"]
+        return out
+    if v["type"] == "enum":
+        return [int(k) for k in v["options"]]
+    raise ValueError("bad validation type")
+
+
+def option_list(setting) -> list[dict]:
+    v = setting["validation"]
+    unit = setting.get("unit", "")
+    if v["type"] == "enum":
+        return [{"value": int(k), "label": str(lbl)} for k, lbl in v["options"].items()]
+    return [{"value": x, "label": f"{x:g} {unit}".strip()} for x in allowed_values(setting)]
+
+
+def setting_current(setting):
+    r = setting["read"]
+    regs = last_blocks.get(r["block"])
+    if regs is None or r["index"] >= len(regs):
+        return None
+    value = regs[r["index"]] / r.get("scale", 1)
+    return int(value) if float(value).is_integer() else value
+
+
+def validate_value(setting, value):
+    """Return the raw register word for value, or raise ValueError."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("value must be a number")
+    allowed = allowed_values(setting)
+    match = next((a for a in allowed if abs(a - value) < 1e-6), None)
+    if match is None:
+        raise ValueError(f"{value} is not an allowed value for {setting['key']}")
+    raw = int(round(match * setting["write"].get("scale", 1)))
+    if not (0 <= raw <= 0xFFFF):
+        raise ValueError("raw value out of range")
+    return match, raw
+
+
+def settings_payload() -> dict:
+    with api_lock:
+        out = []
+        for s in SETTINGS:
+            cur = setting_current(s)
+            out.append(
+                {
+                    "key": s["key"],
+                    "label": s["label"],
+                    "description": s.get("description", ""),
+                    "unit": s.get("unit", ""),
+                    "field_id": s.get("field_id"),
+                    "menu": s.get("menu"),
+                    "type": s["validation"]["type"],
+                    "options": option_list(s),
+                    "current": cur,
+                    "enabled": bool(s.get("enabled", True)) and WRITES_ENABLED,
+                    "note": s.get("note", ""),
+                }
+            )
+        diag = api_state.get("probe_50xx")
+        block5017 = api_state.get("probe_5017_block")
+    b0, b1 = last_blocks.get(0), last_blocks.get(1)
+    status_raw = {}
+    if b0 and len(b0) >= 45:
+        status_raw.update({str(4501 + i): b0[i] for i in (15, 29, 34, 35, 36, 37)})
+    if b1 and len(b1) >= 16:
+        status_raw.update({str(4546 + i): b1[i] for i in range(7, 16)})
+    return {"api_version": API_VERSION, "model": MODEL, "writes_enabled": WRITES_ENABLED,
+            "settings": out,
+            "diagnostics": {"settings_registers_raw": diag,
+                            "settings_block_5017": block5017,
+                            "status_raw": status_raw}}
+
+
+# Write jobs are run by the poll thread, which owns the serial port.
+write_jobs: "queue.Queue" = queue.Queue(maxsize=4)
+write_lock = threading.Lock()  # one write request in flight at a time
+wake = threading.Event()
+
+
+class WriteJob:
+    def __init__(self, setting, value, raw):
+        self.setting = setting
+        self.value = value
+        self.raw = raw
+        self.done = threading.Event()
+        self.result = None
+        self.cancelled = False
+
+
+def run_write_job(ser, job: WriteJob) -> dict:
+    s = job.setting
+    old = setting_current(s)
+    reg = s["write"]["register"]
+    res = {"key": s["key"], "requested": job.value, "old": old, "register": reg}
+    try:
+        ack = write_reg(ser, reg, job.raw)
+    except Exception as exc:
+        ack = {"ack": False, "error": f"{type(exc).__name__}: {exc}"}
+    res.update(ack)
+    # Re-read the block the setting is shown in, so the reply has the value
+    # the inverter now reports.
+    readback = None
+    read_err = ""
+    if ack.get("ack"):
+        time.sleep(0.5)
+        start, count = BLOCK1 if s["read"]["block"] == 0 else BLOCK2
+        for _ in range(3):
+            try:
+                regs = read_regs(ser, start, count)
+                with api_lock:
+                    last_blocks[s["read"]["block"]] = regs
+                apply_block(s["read"]["block"], regs)
+                readback = setting_current(s)
+                if readback == job.value:
+                    break
+            except Exception as exc:
+                read_err = f"{type(exc).__name__}: {exc}"
+            time.sleep(0.7)
+    res["readback"] = readback
+    res["ok"] = bool(ack.get("ack")) and readback == job.value
+    if res["ok"]:
+        res["message"] = f"{s['label']} is now {readback} {s.get('unit', '')}".strip()
+    elif ack.get("ack"):
+        res["message"] = f"Inverter acknowledged, but reads back {readback}" + (f" ({read_err})" if read_err else "")
+    else:
+        res["message"] = res.get("error", "write failed")
+    return res
+
+
+WRITE_LOG = os.path.expanduser("~/powhvm6-writes.log")
+
+
+def log_write(key, result) -> None:
+    try:
+        with open(WRITE_LOG, "a") as f:
+            f.write(json.dumps({"t": time.strftime("%Y-%m-%d %H:%M:%S"), "key": key, **result}) + "\n")
+    except Exception:
+        pass
+
+
+def probe_settings_regs(ser) -> None:
+    """One read-only look at the 50xx settings registers, for diagnostics."""
+    if api_state.get("probe_done"):
+        return
+    api_state["probe_done"] = True
+    out = {}
+    for s in SETTINGS:
+        reg = s["write"]["register"]
+        try:
+            le = read_regs(ser, reg, 1)[0]
+            out[str(reg)] = {"le": le, "be": ((le & 0xFF) << 8) | (le >> 8)}
+        except Exception as exc:
+            out[str(reg)] = {"error": f"{type(exc).__name__}: {exc}"}
+    # Read-only snapshot, one register at a time, of 5017-5033 settings block (battery type,
+    # charger priority, bulk/float/cut-off etc.) so they can be inspected.
+    # These registers are big-endian, unlike the 45xx status blocks.
+    block = {}
+    for reg in range(5017, 5034):
+        try:
+            w = read_regs(ser, reg, 1)[0]
+            block[str(reg)] = ((w & 0xFF) << 8) | (w >> 8)
+        except Exception as exc:
+            block[str(reg)] = f"{type(exc).__name__}: {exc}"
+    with api_lock:
+        api_state["probe_50xx"] = out
+        api_state["probe_5017_block"] = block
+
+
+def process_write_jobs(ser) -> None:
+    while True:
+        try:
+            job = write_jobs.get_nowait()
+        except queue.Empty:
+            return
+        if job.cancelled:
+            job.done.set()
+            continue
+        try:
+            job.result = run_write_job(ser, job)
+        finally:
+            job.done.set()
 
 
 def column_for_age(age: float, n: int):
@@ -660,13 +975,86 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "http_port": HTTP_PORT,
                 },
             )
+        elif path == "/api/v1/settings":
+            self._json(200, settings_payload())
         elif path == "/":
             self._json(
                 200,
-                {"name": "POW-HVM6", "endpoints": ["/api/v1/now", "/api/v1/identity"]},
+                {
+                    "name": "POW-HVM6",
+                    "endpoints": [
+                        "GET /api/v1/now",
+                        "GET /api/v1/identity",
+                        "GET /api/v1/settings",
+                        "POST /api/v1/set",
+                    ],
+                },
             )
         else:
             self._json(404, {"error": "not found"})
+
+    def do_POST(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if path != "/api/v1/set":
+            self._json(404, {"error": "not found"})
+            return
+        # Requiring a JSON content type means a browser page on the LAN can't
+        # send this cross-origin without a preflight, which we never approve.
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            self._json(415, {"ok": False, "message": "Content-Type must be application/json"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 1024:
+            self._json(400, {"ok": False, "message": "bad body length"})
+            return
+        try:
+            body = json.loads(self.rfile.read(length))
+            key = body["key"]
+            value = body["value"]
+        except Exception:
+            self._json(400, {"ok": False, "message": 'body must be {"key": ..., "value": ...}'})
+            return
+        setting = SETTINGS_BY_KEY.get(key) if isinstance(key, str) else None
+        if setting is None:
+            self._json(404, {"ok": False, "message": f"unknown setting {key!r}"})
+            return
+        if not WRITES_ENABLED or not setting.get("enabled", True):
+            self._json(403, {"ok": False, "message": "writes are disabled for this setting"})
+            return
+        try:
+            value, raw = validate_value(setting, value)
+        except ValueError as exc:
+            self._json(422, {"ok": False, "message": str(exc), "options": option_list(setting)})
+            return
+        if body.get("dry_run"):
+            self._json(200, {"ok": True, "dry_run": True, "key": key, "value": value,
+                             "register": setting["write"]["register"], "raw": raw,
+                             "old": setting_current(setting)})
+            return
+        if not write_lock.acquire(timeout=10):
+            self._json(503, {"ok": False, "message": "another write is in progress"})
+            return
+        try:
+            job = WriteJob(setting, value, raw)
+            try:
+                write_jobs.put_nowait(job)
+            except queue.Full:
+                self._json(503, {"ok": False, "message": "write queue full"})
+                return
+            wake.set()
+            if not job.done.wait(15):
+                job.cancelled = True  # never run a write the client gave up on
+                self._json(504, {"ok": False, "message": "timed out waiting for the inverter (serial link down?)"})
+                return
+            result = job.result or {"ok": False, "message": "no result"}
+            log_write(key, result)
+            self._json(200 if result.get("ok") else 502, result)
+        finally:
+            write_lock.release()
 
 
 def start_api() -> None:
@@ -679,7 +1067,7 @@ def start_api() -> None:
 
 def discover_reply() -> bytes:
     return json.dumps(
-        {"name": "POW-HVM6", "model": "POW-HVM6.2M-48V-N", "http_port": HTTP_PORT}
+        {"name": "POW-HVM6", "model": MODEL, "http_port": HTTP_PORT, "api_version": API_VERSION}
     ).encode()
 
 
@@ -718,6 +1106,8 @@ def main() -> None:
                 err1 = err
             else:
                 apply_block(0, regs)
+                with api_lock:
+                    last_blocks[0] = regs
                 lat1 = rtt
                 err1 = ""
                 remember(history, regs, activity)
@@ -732,10 +1122,15 @@ def main() -> None:
                     err2 = err
                 else:
                     apply_block(1, regs)
+                    with api_lock:
+                        last_blocks[1] = regs
                     lat2 = rtt
                     err2 = ""
                 if dead:
                     ser = close_port(ser)
+            if ser is not None and not err1:
+                probe_settings_regs(ser)
+                process_write_jobs(ser)
         except Exception as exc:
             err1 = err2 = f"{type(exc).__name__}: {exc}"
             drops1 += 1
@@ -770,7 +1165,8 @@ def main() -> None:
         sys.stdout.flush()
         delay = INTERVAL - (time.monotonic() - t0)
         if delay > 0:
-            time.sleep(delay)
+            wake.wait(delay)
+            wake.clear()
 
 
 if __name__ == "__main__":

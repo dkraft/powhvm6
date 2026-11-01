@@ -28,6 +28,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.dkraft.powhvm6.ui.DashboardScreen
 import com.dkraft.powhvm6.ui.SearchScreen
+import com.dkraft.powhvm6.ui.SettingEditorHost
 import com.dkraft.powhvm6.ui.SettingsScreen
 
 class MainActivity : ComponentActivity() {
@@ -96,5 +97,6 @@ fun AppRoot(vm: MainViewModel) {
             1 -> SettingsScreen(vm, modifier = Modifier.padding(pad))
             2 -> SearchScreen(vm, modifier = Modifier.padding(pad))
         }
+        SettingEditorHost(vm)
     }
 }
