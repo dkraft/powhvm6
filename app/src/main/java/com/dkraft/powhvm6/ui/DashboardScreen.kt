@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.dkraft.powhvm6.BuildConfig
 import com.dkraft.powhvm6.Field
 import com.dkraft.powhvm6.HistoryPoint
 import com.dkraft.powhvm6.MainViewModel
@@ -94,6 +95,11 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     text = if (snap.linkOk) "Live" else "Offline",
                     style = MaterialTheme.typography.labelMedium,
                     color = if (snap.linkOk) Color(0xFF4CAF50) else Color(0xFFE53935)
+                )
+                Text(
+                    text = " · v${BuildConfig.VERSION_NAME}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
                 Spacer(Modifier.weight(1f))
                 Text(
@@ -166,8 +172,28 @@ fun FieldCell(field: Field?, modifier: Modifier = Modifier) {
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
+            val perBattery = perBatteryVolts(field)
+            if (perBattery != null) {
+                Text(
+                    text = String.format(java.util.Locale.US, "%.2f V each", perBattery),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+            }
         }
     }
+}
+
+/** Pack is 4 x 12 V batteries in series; show pack voltage / 4 under the "Battery" field. */
+private const val BATTERIES_IN_SERIES = 4
+
+private fun perBatteryVolts(field: Field): Double? {
+    if (field.id != "battery") return null
+    val v = field.number
+        ?: Regex("""-?\d+(\.\d+)?""").find(field.text)?.value?.toDoubleOrNull()
+        ?: return null
+    if (v.isNaN() || v <= 0.0) return null
+    return v / BATTERIES_IN_SERIES
 }
 
 @Composable
