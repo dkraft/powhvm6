@@ -1,0 +1,29 @@
+[Unit]
+Description=htop on the HDMI console
+After=systemd-user-sessions.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+SupplementaryGroups=tty video
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+Environment=TERM=linux
+WorkingDirectory=/home/pi
+ExecStartPre=+/usr/bin/chvt 1
+ExecStartPre=-+/usr/bin/setfont /usr/share/consolefonts/Lat15-TerminusBold24x12.psf.gz
+ExecStart=/usr/local/sbin/hdmi-htop.sh
+ExecStop=-/usr/bin/tmux -L hdmi kill-server
+Restart=always
+RestartSec=2
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
