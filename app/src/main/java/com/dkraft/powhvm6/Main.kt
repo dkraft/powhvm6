@@ -1,8 +1,14 @@
 package com.dkraft.powhvm6
 
+import android.graphics.Color as AndroidColor
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -25,12 +31,25 @@ import com.dkraft.powhvm6.ui.SearchScreen
 import com.dkraft.powhvm6.ui.SettingsScreen
 
 class MainActivity : ComponentActivity() {
+    // Lifecycle-scoped so rotation doesn't create a second poller.
+    private val vm: MainViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        val vm = MainViewModel(application)
-        val night = vm.settings.nightMode
         setContent {
-            PowHvmTheme(nightMode = night) {
+            val dark = when (vm.themeMode) {
+                ThemeMode.SYSTEM -> isSystemInDarkTheme()
+                ThemeMode.DARK -> true
+                ThemeMode.LIGHT -> false
+            }
+            // Status/navigation bar icons follow the chosen scheme, not just the system one.
+            LaunchedEffect(dark) {
+                val style = if (dark) SystemBarStyle.dark(AndroidColor.TRANSPARENT)
+                else SystemBarStyle.light(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT)
+                enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+            }
+            PowHvmTheme(nightMode = dark) {
                 AppRoot(vm)
             }
         }

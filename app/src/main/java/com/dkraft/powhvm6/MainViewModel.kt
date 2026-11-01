@@ -27,6 +27,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var searching by mutableStateOf(false)
         private set
 
+    /** Observable so theme changes recompose immediately. */
+    var themeMode by mutableStateOf(settings.themeMode)
+        private set
+
+    fun updateThemeMode(mode: ThemeMode) {
+        settings.themeMode = mode
+        themeMode = mode
+    }
+
+    /** Observable so field toggles update immediately. */
+    var hiddenFields by mutableStateOf(settings.hiddenFields())
+        private set
+
+    fun isFieldVisible(id: String): Boolean = id !in hiddenFields
+
+    fun setFieldVisible(id: String, visible: Boolean) {
+        settings.setFieldVisible(id, visible)
+        hiddenFields = settings.hiddenFields()
+    }
+
     private var pollJob: Job? = null
 
     init {

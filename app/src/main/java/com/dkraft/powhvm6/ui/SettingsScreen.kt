@@ -29,6 +29,11 @@ import androidx.compose.ui.unit.dp
 import com.dkraft.powhvm6.HostAddr
 import com.dkraft.powhvm6.MainViewModel
 import com.dkraft.powhvm6.Settings
+import com.dkraft.powhvm6.ThemeMode
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 
 @Composable
 fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
@@ -69,22 +74,15 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
 
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Night mode", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "Dark background for low-light use.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                        )
-                    }
-                    Switch(
-                        checked = vm.settings.nightMode,
-                        onCheckedChange = { vm.settings.nightMode = it }
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Night mode", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "System follows your phone's dark theme setting.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                     )
+                    Spacer(Modifier.height(12.dp))
+                    ThemeModeSelector(vm)
                 }
             }
         }
@@ -103,6 +101,21 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     FieldToggles(vm)
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ThemeModeSelector(vm: MainViewModel) {
+    val modes = ThemeMode.values()
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        modes.forEachIndexed { i, mode ->
+            SegmentedButton(
+                selected = vm.themeMode == mode,
+                onClick = { vm.updateThemeMode(mode) },
+                shape = SegmentedButtonDefaults.itemShape(index = i, count = modes.size)
+            ) { Text(mode.label) }
         }
     }
 }
@@ -142,8 +155,8 @@ fun FieldToggles(vm: MainViewModel) {
                     modifier = Modifier.weight(1f)
                 )
                 Switch(
-                    checked = vm.settings.isFieldVisible(f.id),
-                    onCheckedChange = { vm.settings.setFieldVisible(f.id, it) }
+                    checked = vm.isFieldVisible(f.id),
+                    onCheckedChange = { vm.setFieldVisible(f.id, it) }
                 )
             }
         }
