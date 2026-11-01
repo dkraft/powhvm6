@@ -411,6 +411,37 @@ SETTINGS = [
         "enabled": True,
         "note": "If Max charge is lower, the inverter uses Max charge for AC charging.",
     },
+    {
+        # Program 26. Only used when battery type (program 05) is User-defined.
+        # 5027 holds volts x10, big-endian; mirrored in 4546 (block 1, index 0).
+        "key": "bulk_charge_voltage",
+        "label": "Bulk (CV)",
+        "description": "Bulk / constant-voltage charging target for the pack",
+        "unit": "V",
+        "field_id": "bulk",
+        "menu": 26,
+        "write": {"function": 6, "register": 5027, "scale": 10},
+        "read": {"block": 1, "index": 0, "scale": 10},
+        "validation": {"type": "range", "min": 48.0, "max": 60.0, "step": 0.1,
+                       "min_of": "float_charge_voltage"},
+        "enabled": True,
+        "note": "Must be at least the float voltage. LiFePO4 16S: divide by 16 for volts per cell.",
+    },
+    {
+        # Program 27. 5028 holds volts x10, big-endian; mirrored in 4547.
+        "key": "float_charge_voltage",
+        "label": "Float",
+        "description": "Float (hold) charging voltage for the pack",
+        "unit": "V",
+        "field_id": "float",
+        "menu": 27,
+        "write": {"function": 6, "register": 5028, "scale": 10},
+        "read": {"block": 1, "index": 1, "scale": 10},
+        "validation": {"type": "range", "min": 48.0, "max": 60.0, "step": 0.1,
+                       "max_of": "bulk_charge_voltage"},
+        "enabled": True,
+        "note": "Must not exceed the bulk (CV) voltage. Lower it first before lowering bulk.",
+    },
 ]
 SETTINGS_BY_KEY = {s["key"]: s for s in SETTINGS}
 
@@ -423,11 +454,8 @@ def allowed_values(setting) -> list:
     if v["type"] == "options":
         return list(v["values"])
     if v["type"] == "range":
-        out, x = [], v["min"]
-        while x <= v["max"] + 1e-9:
-            out.append(round(x, 4))
-            x += v["step"]
-        return out
+        n = int(round((v["max"] - v["min"]) / v["step"]))
+        return [round(v["min"] + i * v["step"], 4) for i in range(n + 1)]
     if v["type"] == "enum":
         return [int(k) for k in v["options"]]
     raise ValueError("bad validation type")
@@ -462,6 +490,24 @@ def validate_value(setting, value):
     if not (0 <= raw <= 0xFFFF):
         raise ValueError("raw value out of range")
     return match, raw
+
+
+def check_relations(setting, value) -> None:
+    """Cross-setting limits (e.g. float <= bulk), against current readings."""
+    v = setting["validation"]
+    for rel, cmp_ok, word in (("min_of", lambda a, b: a >= b - 1e-6, "below"),
+                              ("max_of", lambda a, b: a <= b + 1e-6, "above")):
+        other_key = v.get(rel)
+        if not other_key:
+            continue
+        other = SETTINGS_BY_KEY[other_key]
+        cur = setting_current(other)
+        if cur is None:
+            raise ValueError(f"{other['label']} hasn't been read yet; try again")
+        if not cmp_ok(value, cur):
+            unit = other.get("unit", "")
+            raise ValueError(f"{setting['label']} can't be {word} {other['label']} "
+                             f"({cur:g} {unit})")
 
 
 def settings_payload() -> dict:
@@ -521,6 +567,12 @@ def run_write_job(ser, job: WriteJob) -> dict:
     reg = s["write"]["register"]
     res = {"key": s["key"], "requested": job.value, "old": old, "register": reg}
     try:
+        check_relations(s, job.value)  # re-check against the freshest readings
+    except ValueError as exc:
+        res.update({"ack": False, "error": str(exc), "readback": old, "ok": False,
+                    "message": str(exc)})
+        return res
+    try:
         ack = write_reg(ser, reg, job.raw)
     except Exception as exc:
         ack = {"ack": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -539,13 +591,13 @@ def run_write_job(ser, job: WriteJob) -> dict:
                     last_blocks[s["read"]["block"]] = regs
                 apply_block(s["read"]["block"], regs)
                 readback = setting_current(s)
-                if readback == job.value:
+                if readback is not None and abs(readback - job.value) < 1e-6:
                     break
             except Exception as exc:
                 read_err = f"{type(exc).__name__}: {exc}"
             time.sleep(0.7)
     res["readback"] = readback
-    res["ok"] = bool(ack.get("ack")) and readback == job.value
+    res["ok"] = bool(ack.get("ack")) and readback is not None and abs(readback - job.value) < 1e-6
     if res["ok"]:
         res["message"] = f"{s['label']} is now {readback} {s.get('unit', '')}".strip()
     elif ack.get("ack"):
@@ -1027,6 +1079,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         try:
             value, raw = validate_value(setting, value)
+            with api_lock:
+                check_relations(setting, value)
         except ValueError as exc:
             self._json(422, {"ok": False, "message": str(exc), "options": option_list(setting)})
             return

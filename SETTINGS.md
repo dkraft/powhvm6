@@ -6,7 +6,8 @@ To expose another setting, add an entry to `SETTINGS` in `hdmi-inverter.py`, dep
 the script, and it shows up in the app (Settings → Inverter settings, and as a
 tappable tile on the dashboard if `field_id` matches a dashboard field).
 
-Enabled today: **Max charge** (LCD program 02) and **AC max charge** (program 11).
+Enabled today: **Max charge** (LCD program 02), **AC max charge** (program 11), **Bulk (CV)** (program 26, reg 5027) and **Float** (program 27, reg 5028).
+Bulk/Float: 48.0–60.0 V in 0.1 V steps (needs program 05 = User-defined, reg 5020 = 2). The API rejects Float above Bulk, so to lower both, write Float first; to raise both, write Bulk first.
 
 ## Protocol facts (POW-HVM6.2M-48V-N, Modbus RTU)
 
