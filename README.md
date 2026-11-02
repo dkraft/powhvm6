@@ -2,7 +2,9 @@
 
 HDMI console and Android dashboard for a PowMr POW-HVM6.2M-48V-N. A Python script on the Raspberry Pi polls the inverter over RS-232 Modbus RTU, draws the readings on the local tty, and serves a LAN JSON API for the phone app.
 
-Every 2 seconds it sends the same two read-only holding-register requests the official Wi-Fi dongle sends: 45 registers at 4501, then 16 registers at 4546. The link is 2400 baud, 8N1, slave 5. Register words are little-endian. No settings are written.
+Every 2 seconds it sends the same two read-only holding-register requests the official Wi-Fi dongle sends: 45 registers at 4501, then 16 registers at 4546. The link is 2400 baud, 8N1, slave 5. Register words are little-endian. The only writes are the validated settings in the registry (see [SETTINGS.md](SETTINGS.md)).
+
+Developers and coding agents: start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## HDMI console
 
@@ -33,6 +35,8 @@ The same process that owns the serial port also runs an HTTP server and a UDP di
 |---|---|
 | `GET http://<ip>:8088/api/v1/now` | Live snapshot: all 32 fields (id, label, group, text, number), frame latency/drops, link status, 360-point load-% history |
 | `GET http://<ip>:8088/api/v1/identity` | Name, model, HTTP port |
+| `GET http://<ip>:8088/api/v1/settings` | Writable settings registry: definitions, current values, allowed options, read-only diagnostics |
+| `POST http://<ip>:8088/api/v1/set` | Change one registry setting: `{"key": "...", "value": N}` (JSON only). Validated, written, read back. See [SETTINGS.md](SETTINGS.md) |
 | UDP port 28776 | Discovery. Send `powhvm6-discover`, get back JSON with the HTTP port |
 
 All endpoints are CORS-enabled (`Access-Control-Allow-Origin: *`) so a browser or web app can read them directly.

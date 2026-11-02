@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Live POW-HVM6 readout for the HDMI console. Read-only Modbus.
+"""Live POW-HVM6 readout for the HDMI console, plus a small LAN API.
+
+Monitoring is read-only Modbus. The only writes are the settings listed
+in SETTINGS below, sent through POST /api/v1/set (see SETTINGS.md).
 
 The official Wi-Fi dongle polls two holding-register blocks on slave 5
 at 2400 8N1: 45 registers at 4501, then 16 registers at 4546.
@@ -11,8 +14,12 @@ green while the battery is charging, red while it is discharging, and
 cyan while it is doing neither. Charge mins and disch mins count time
 in those states since this screen started.
 """
+import collections
+import datetime
 import json
 import math
+import os
+import queue
 import shutil
 import socket
 import sys
@@ -35,6 +42,10 @@ HISTORY_KEEP = 50000
 HTTP_PORT = 8088
 DISCOVER_PORT = 28776
 DISCOVER_MAGIC = b"powhvm6-discover"
+MODEL = "POW-HVM6.2M-48V-N"
+# Set to False to turn POST /api/v1/set off without touching the registry.
+WRITES_ENABLED = True
+API_VERSION = 2
 
 # Linux console colors. Cyan is idle so green and red stay unambiguous.
 CYAN = "\033[36m"
@@ -95,6 +106,67 @@ def read_regs(ser, start: int, count: int) -> list[int]:
     if len(data) < count * 2:
         raise TimeoutError("short reply")
     return [data[i] | (data[i + 1] << 8) for i in range(0, count * 2, 2)]
+
+
+def await_reply(ser, need_fn, timeout=1.5) -> bytes:
+    buf = b""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        n = ser.in_waiting
+        if n:
+            buf += ser.read(n)
+            need = need_fn(buf)
+            if need is not None and len(buf) >= need:
+                break
+        else:
+            time.sleep(0.02)
+    return buf
+
+
+def write_reg(ser, register: int, value: int) -> dict:
+    """Modbus function 06 (write single register). Returns ack/exception info.
+
+    Settings registers (50xx) take a normal big-endian word, unlike the
+    little-endian words the 45xx monitoring block returns.
+    """
+    if not (0 <= value <= 0xFFFF):
+        raise ValueError("value out of 16-bit range")
+    pdu = bytes(
+        (
+            SLAVE,
+            6,
+            (register >> 8) & 0xFF,
+            register & 0xFF,
+            (value >> 8) & 0xFF,
+            value & 0xFF,
+        )
+    )
+    frame = pdu + crc(pdu)
+    ser.reset_input_buffer()
+    ser.write(frame)
+    ser.flush()
+
+    def need(buf):
+        if len(buf) >= 2 and buf[1] == 0x86:
+            return 5
+        if len(buf) >= 2:
+            return 8
+        return None
+
+    buf = await_reply(ser, need)
+    if len(buf) >= 5 and buf[0] == SLAVE and buf[1] == 0x86:
+        if crc(buf[:3]) != buf[3:5]:
+            return {"ack": False, "error": "bad crc on exception reply"}
+        code = buf[2]
+        names = {1: "illegal function", 2: "illegal address", 3: "illegal value", 4: "device failure"}
+        return {"ack": False, "exception": code, "error": f"inverter NAK: {names.get(code, 'code ' + str(code))}"}
+    if len(buf) < 8:
+        return {"ack": False, "error": "no reply" if not buf else f"short reply {buf.hex()}"}
+    if crc(buf[:6]) != buf[6:8]:
+        return {"ack": False, "error": "bad crc"}
+    if buf[:6] != pdu:
+        return {"ack": False, "error": f"unexpected echo {buf[:8].hex()}"}
+    return {"ack": True}
 
 
 class Field:
@@ -292,6 +364,427 @@ FIELD_GROUPS = {
 }
 for _field in FIELDS:
     _field.group = FIELD_GROUPS.get(_field.label, "other")
+
+
+# ---------------------------------------------------------------------------
+# Writable settings registry. Adding a setting is one entry here; the API and
+# the Android app pick it up automatically. See SETTINGS.md.
+#
+#   key         stable id used by POST /api/v1/set
+#   label/unit  shown in the app editor
+#   field_id    dashboard field this setting edits (Field.fid), or None
+#   menu        inverter LCD program number, for reference
+#   write       Modbus write: function 6 to `register`, raw = value * scale
+#   read        where the current value comes from: (block, index) in the
+#               polled blocks, decoded as raw / scale
+#   validation  exactly one of:
+#                 {"type": "options", "values": [..]}        numeric list
+#                 {"type": "range", "min": a, "max": b, "step": s}
+#                 {"type": "enum", "options": {raw_int: "label", ..}}
+#   enabled     False keeps it listed but refuses writes
+#   note        optional hint shown in the editor
+# Allowed values below are the LCD options in the POW-HVM3.6/4.2/6.2M-N
+# manual (V1.3.0514) for the 6.2 kW 48 V model.
+# ---------------------------------------------------------------------------
+SETTINGS = [
+    {
+        "key": "max_charge_current",
+        "label": "Max charge",
+        "description": "Maximum total charging current (solar + utility)",
+        "unit": "A",
+        "field_id": "max_charge",
+        "menu": 2,
+        "write": {"function": 6, "register": 5022, "scale": 1},
+        "read": {"block": 0, "index": 40, "scale": 1},
+        "validation": {"type": "range", "min": 10, "max": 120, "step": 10},
+        "enabled": True,
+        "note": "Must be at least the AC max charge; set below your battery/BMS limit.",
+    },
+    {
+        "key": "max_ac_charge_current",
+        "label": "AC chg max",
+        "description": "Maximum utility (AC) charging current",
+        "unit": "A",
+        "field_id": "ac_chg_max",
+        "menu": 11,
+        "write": {"function": 6, "register": 5024, "scale": 1},
+        "read": {"block": 0, "index": 42, "scale": 1},
+        "validation": {"type": "options", "values": [2, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]},
+        "enabled": True,
+        "note": "If Max charge is lower, the inverter uses Max charge for AC charging.",
+    },
+    {
+        # Program 26. Only used when battery type (program 05) is User-defined.
+        # 5027 holds volts x10, big-endian; mirrored in 4546 (block 1, index 0).
+        "key": "bulk_charge_voltage",
+        "label": "Bulk (CV)",
+        "description": "Bulk / constant-voltage charging target for the pack",
+        "unit": "V",
+        "field_id": "bulk",
+        "menu": 26,
+        "write": {"function": 6, "register": 5027, "scale": 10},
+        "read": {"block": 1, "index": 0, "scale": 10},
+        "validation": {"type": "range", "min": 48.0, "max": 60.0, "step": 0.1,
+                       "min_of": "float_charge_voltage"},
+        "enabled": True,
+        "note": "Must be at least the float voltage. LiFePO4 16S: divide by 16 for volts per cell.",
+    },
+    {
+        # Program 27. 5028 holds volts x10, big-endian; mirrored in 4547.
+        "key": "float_charge_voltage",
+        "label": "Float",
+        "description": "Float (hold) charging voltage for the pack",
+        "unit": "V",
+        "field_id": "float",
+        "menu": 27,
+        "write": {"function": 6, "register": 5028, "scale": 10},
+        "read": {"block": 1, "index": 1, "scale": 10},
+        "validation": {"type": "range", "min": 48.0, "max": 60.0, "step": 0.1,
+                       "max_of": "bulk_charge_voltage"},
+        "enabled": True,
+        "note": "Must not exceed the bulk (CV) voltage. Lower it first before lowering bulk.",
+    },
+    {
+        # Program 12 (SBU / Solar first): battery voltage at which loads go
+        # back to utility. 5025 holds volts x10, big-endian; mirrored in 4544
+        # (block 0, index 43). 6.2 kW options: 42-51 V in 1 V steps.
+        "key": "back_to_grid_voltage",
+        "label": "To grid",
+        "description": "Battery voltage where loads switch back to utility (SBU / Solar first)",
+        "unit": "V",
+        "field_id": "to_grid",
+        "menu": 12,
+        "write": {"function": 6, "register": 5025, "scale": 10},
+        "read": {"block": 0, "index": 43, "scale": 10},
+        "validation": {"type": "range", "min": 42, "max": 51, "step": 1,
+                       "min_of": {"read": {"block": 1, "index": 2, "scale": 10},
+                                  "label": "Low cutoff", "unit": "V", "margin": 1},
+                       "max_of": {"key": "back_to_battery_voltage", "margin": 1}},
+        "enabled": True,
+        "note": "Must be at least 1 V above Low cutoff and 1 V below To battery.",
+    },
+    {
+        # Program 13: battery voltage at which loads return to battery.
+        # 5026 holds volts x10, big-endian; mirrored in 4545 (block 0, index 44).
+        # 6.2 kW options: 48-58 V in 1 V steps. The LCD "FUL" (battery fully
+        # charged) option is left out: its raw register value isn't documented.
+        "key": "back_to_battery_voltage",
+        "label": "To battery",
+        "description": "Battery voltage where loads switch back to battery (SBU / Solar first)",
+        "unit": "V",
+        "field_id": "to_battery",
+        "menu": 13,
+        "write": {"function": 6, "register": 5026, "scale": 10},
+        "read": {"block": 0, "index": 44, "scale": 10},
+        "validation": {"type": "range", "min": 48, "max": 58, "step": 1,
+                       "min_of": {"key": "back_to_grid_voltage", "margin": 1}},
+        "enabled": True,
+        "note": "Must be at least 1 V above To grid. Keep it at or below what charging actually reaches (float).",
+    },
+    {
+        # Program 01. 5018, mirrored in 4537 (block 0, index 36). Raw values
+        # from the odya ESPHome PowMr config (tested on HVM2.4H/10.2M);
+        # 0 = Utility first matches this unit's live reading. MKS (in the
+        # 6.2 kW manual) is left out: its raw value isn't documented.
+        "key": "output_source_priority",
+        "label": "Output mode",
+        "description": "Output source priority: which source powers the loads first",
+        "unit": "",
+        "field_id": "output_mode",
+        "menu": 1,
+        "write": {"function": 6, "register": 5018, "scale": 1},
+        "read": {"block": 0, "index": 36, "scale": 1},
+        "validation": {"type": "enum", "options": {
+            0: "Utility first (USB)",
+            1: "Solar first (SUB)",
+            2: "SBU priority (solar, battery, then utility)"}},
+        "enabled": True,
+        "note": "Changes where the house load comes from. SBU drains the battery to To grid before using utility.",
+    },
+    {
+        # Program 16. 5017, mirrored in 4536 (block 0, index 35). Raw values
+        # from the odya ESPHome PowMr config; 1 = Solar first matches this
+        # unit's live reading. 0 (Utility first) is left out: the 6.2 kW
+        # manual has no such charger option.
+        "key": "charger_source_priority",
+        "label": "Charge mode",
+        "description": "Charger source priority: what may charge the battery",
+        "unit": "",
+        "field_id": "charge_mode",
+        "menu": 16,
+        "write": {"function": 6, "register": 5017, "scale": 1},
+        "read": {"block": 0, "index": 35, "scale": 1},
+        "validation": {"type": "enum", "options": {
+            1: "Solar first (utility only when no solar)",
+            2: "Solar + utility",
+            3: "Only solar (never charge from utility)"}},
+        "enabled": True,
+        "note": "Only applies on utility/standby; on battery only solar charges.",
+    },
+    {
+        # Program 03. 5019, mirrored in 4538 (block 0, index 37). Raw values
+        # from odya docs/registers-map.md ("0 - 90-280VAC, 1 - 170-280VAC") and
+        # src/modules/inverter.yaml (0 Appliances, 1 UPS); the 6.2 kW manual lists
+        # APL (default) then UPS. Both seen on this unit (4538 read 0, then 1
+        # after a UPS write on 2026-11-01).
+        "key": "ac_input_range",
+        "label": "AC range",
+        "description": "AC input voltage range accepted from the grid",
+        "unit": "",
+        "field_id": "ac_range",
+        "menu": 3,
+        "write": {"function": 6, "register": 5019, "scale": 1},
+        "read": {"block": 0, "index": 37, "scale": 1},
+        "validation": {"type": "enum", "options": {
+            0: "Appliances (90-280 V, wide)",
+            1: "UPS (170-280 V, narrow, faster transfer)"}},
+        "enabled": True,
+        "note": "Appliances accepts 90-280 V input. UPS accepts 170-280 V and switches to battery faster.",
+    },
+]
+SETTINGS_BY_KEY = {s["key"]: s for s in SETTINGS}
+
+# Latest raw register blocks, kept for settings reads.
+last_blocks = {0: None, 1: None}
+
+
+def allowed_values(setting) -> list:
+    v = setting["validation"]
+    if v["type"] == "options":
+        return list(v["values"])
+    if v["type"] == "range":
+        n = int(round((v["max"] - v["min"]) / v["step"]))
+        return [round(v["min"] + i * v["step"], 4) for i in range(n + 1)]
+    if v["type"] == "enum":
+        return [int(k) for k in v["options"]]
+    raise ValueError("bad validation type")
+
+
+def option_list(setting) -> list[dict]:
+    v = setting["validation"]
+    unit = setting.get("unit", "")
+    if v["type"] == "enum":
+        return [{"value": int(k), "label": str(lbl)} for k, lbl in v["options"].items()]
+    return [{"value": x, "label": f"{x:g} {unit}".strip()} for x in allowed_values(setting)]
+
+
+def setting_current(setting):
+    r = setting["read"]
+    regs = last_blocks.get(r["block"])
+    if regs is None or r["index"] >= len(regs):
+        return None
+    value = regs[r["index"]] / r.get("scale", 1)
+    return int(value) if float(value).is_integer() else value
+
+
+def validate_value(setting, value):
+    """Return the raw register word for value, or raise ValueError."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("value must be a number")
+    allowed = allowed_values(setting)
+    match = next((a for a in allowed if abs(a - value) < 1e-6), None)
+    if match is None:
+        raise ValueError(f"{value} is not an allowed value for {setting['key']}")
+    raw = int(round(match * setting["write"].get("scale", 1)))
+    if not (0 <= raw <= 0xFFFF):
+        raise ValueError("raw value out of range")
+    return match, raw
+
+
+def _relation_ref(spec):
+    """A relation target: "<key>" or {"key": k, "margin": m} or
+    {"read": {...}, "label": l, "unit": u, "margin": m}. Returns (label, unit, current, margin)."""
+    if isinstance(spec, str):
+        spec = {"key": spec}
+    margin = float(spec.get("margin", 0))
+    if "key" in spec:
+        other = SETTINGS_BY_KEY[spec["key"]]
+        return other["label"], other.get("unit", ""), setting_current(other), margin
+    return spec.get("label", "?"), spec.get("unit", ""), setting_current({"read": spec["read"]}), margin
+
+
+def check_relations(setting, value) -> None:
+    """Cross-setting limits (e.g. float <= bulk), against current readings."""
+    v = setting["validation"]
+    for rel in ("min_of", "max_of"):
+        spec = v.get(rel)
+        if not spec:
+            continue
+        label, unit, cur, margin = _relation_ref(spec)
+        if cur is None:
+            raise ValueError(f"{label} hasn't been read yet; try again")
+        if rel == "min_of":
+            ok, limit, word = value >= cur + margin - 1e-6, cur + margin, "below"
+        else:
+            ok, limit, word = value <= cur - margin + 1e-6, cur - margin, "above"
+        if not ok:
+            extra = f" {'+' if rel == 'min_of' else '-'} {margin:g}" if margin else ""
+            raise ValueError(f"{setting['label']} can't be {word} {limit:g} {unit} "
+                             f"({label} {cur:g} {unit}{extra})".replace("  ", " "))
+
+
+def settings_payload() -> dict:
+    with api_lock:
+        out = []
+        for s in SETTINGS:
+            cur = setting_current(s)
+            out.append(
+                {
+                    "key": s["key"],
+                    "label": s["label"],
+                    "description": s.get("description", ""),
+                    "unit": s.get("unit", ""),
+                    "field_id": s.get("field_id"),
+                    "menu": s.get("menu"),
+                    "type": s["validation"]["type"],
+                    "options": option_list(s),
+                    "current": cur,
+                    "enabled": bool(s.get("enabled", True)) and WRITES_ENABLED,
+                    "note": s.get("note", ""),
+                }
+            )
+        diag = api_state.get("probe_50xx")
+        block5017 = api_state.get("probe_5017_block")
+        probe_time = api_state.get("probe_time")
+    b0, b1 = last_blocks.get(0), last_blocks.get(1)
+    status_raw = {}
+    if b0 and len(b0) >= 45:
+        status_raw.update({str(4501 + i): b0[i] for i in (15, 29, 34, 35, 36, 37)})
+    if b1 and len(b1) >= 16:
+        status_raw.update({str(4546 + i): b1[i] for i in range(7, 16)})
+    return {"api_version": API_VERSION, "model": MODEL, "writes_enabled": WRITES_ENABLED,
+            "settings": out,
+            "diagnostics": {"settings_registers_raw": diag,
+                            "settings_block_5017": block5017,
+                            "settings_probe_time": probe_time,
+                            "status_raw": status_raw}}
+
+
+# Write jobs are run by the poll thread, which owns the serial port.
+write_jobs: "queue.Queue" = queue.Queue(maxsize=4)
+write_lock = threading.Lock()  # one write request in flight at a time
+wake = threading.Event()
+
+
+class WriteJob:
+    def __init__(self, setting, value, raw):
+        self.setting = setting
+        self.value = value
+        self.raw = raw
+        self.done = threading.Event()
+        self.result = None
+        self.cancelled = False
+
+
+def run_write_job(ser, job: WriteJob) -> dict:
+    s = job.setting
+    old = setting_current(s)
+    reg = s["write"]["register"]
+    res = {"key": s["key"], "requested": job.value, "old": old, "register": reg}
+    try:
+        check_relations(s, job.value)  # re-check against the freshest readings
+    except ValueError as exc:
+        res.update({"ack": False, "error": str(exc), "readback": old, "ok": False,
+                    "message": str(exc)})
+        return res
+    try:
+        ack = write_reg(ser, reg, job.raw)
+    except Exception as exc:
+        ack = {"ack": False, "error": f"{type(exc).__name__}: {exc}"}
+    res.update(ack)
+    # Re-read the block the setting is shown in, so the reply has the value
+    # the inverter now reports.
+    readback = None
+    read_err = ""
+    if ack.get("ack"):
+        time.sleep(0.5)
+        start, count = BLOCK1 if s["read"]["block"] == 0 else BLOCK2
+        for _ in range(3):
+            try:
+                regs = read_regs(ser, start, count)
+                with api_lock:
+                    last_blocks[s["read"]["block"]] = regs
+                apply_block(s["read"]["block"], regs)
+                readback = setting_current(s)
+                if readback is not None and abs(readback - job.value) < 1e-6:
+                    break
+            except Exception as exc:
+                read_err = f"{type(exc).__name__}: {exc}"
+            time.sleep(0.7)
+    res["readback"] = readback
+    res["ok"] = bool(ack.get("ack")) and readback is not None and abs(readback - job.value) < 1e-6
+    if ack.get("ack"):
+        api_state["probe_due"] = 0  # refresh the 50xx diagnostics snapshot next loop
+    if res["ok"]:
+        shown = s["validation"].get("options", {}).get(int(readback)) if s["validation"]["type"] == "enum" else None
+        res["message"] = (f"{s['label']} is now {shown}" if shown else
+                          f"{s['label']} is now {readback} {s.get('unit', '')}".strip())
+    elif ack.get("ack"):
+        res["message"] = f"Inverter acknowledged, but reads back {readback}" + (f" ({read_err})" if read_err else "")
+    else:
+        res["message"] = res.get("error", "write failed")
+    return res
+
+
+WRITE_LOG = os.path.expanduser("~/powhvm6-writes.log")
+
+
+def log_write(key, result) -> None:
+    try:
+        with open(WRITE_LOG, "a") as f:
+            f.write(json.dumps({"t": time.strftime("%Y-%m-%d %H:%M:%S"), "key": key, **result}) + "\n")
+    except Exception:
+        pass
+
+
+PROBE_INTERVAL_S = 600
+
+
+def probe_settings_regs(ser) -> None:
+    """Read-only look at the 50xx settings registers, for diagnostics.
+
+    Runs at startup, every PROBE_INTERVAL_S, and right after a successful
+    write (run_write_job clears probe_due)."""
+    if time.monotonic() < api_state.get("probe_due", 0):
+        return
+    api_state["probe_due"] = time.monotonic() + PROBE_INTERVAL_S
+    out = {}
+    for s in SETTINGS:
+        reg = s["write"]["register"]
+        try:
+            le = read_regs(ser, reg, 1)[0]
+            out[str(reg)] = {"le": le, "be": ((le & 0xFF) << 8) | (le >> 8)}
+        except Exception as exc:
+            out[str(reg)] = {"error": f"{type(exc).__name__}: {exc}"}
+    # Read-only snapshot, one register at a time, of 5017-5033 settings block (battery type,
+    # charger priority, bulk/float/cut-off etc.) so they can be inspected.
+    # These registers are big-endian, unlike the 45xx status blocks.
+    block = {}
+    for reg in range(5017, 5034):
+        try:
+            w = read_regs(ser, reg, 1)[0]
+            block[str(reg)] = ((w & 0xFF) << 8) | (w >> 8)
+        except Exception as exc:
+            block[str(reg)] = f"{type(exc).__name__}: {exc}"
+    with api_lock:
+        api_state["probe_50xx"] = out
+        api_state["probe_5017_block"] = block
+        api_state["probe_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def process_write_jobs(ser) -> None:
+    while True:
+        try:
+            job = write_jobs.get_nowait()
+        except queue.Empty:
+            return
+        if job.cancelled:
+            job.done.set()
+            continue
+        try:
+            job.result = run_write_job(ser, job)
+        finally:
+            job.done.set()
 
 
 def column_for_age(age: float, n: int):
@@ -531,6 +1024,184 @@ class Activity:
 # Shared API state. The poll thread writes, HTTP threads read.
 history: deque = deque(maxlen=HISTORY_KEEP)
 history_lock = threading.Lock()
+FEED_FILE = os.path.expanduser("~/powhvm6-feed.json")
+FEED_MIN_V = 80.0      # AC input below this (or below FEED_MIN_HZ) counts as no grid
+FEED_MIN_HZ = 40.0
+FEED_DEBOUNCE = 3      # consecutive good block-0 polls (~6 s at INTERVAL 2 s) to change state
+FEED_SAG_V = 200.0     # blip: any good poll below this (or FEED_MIN_HZ) that doesn't become an outage
+BLIP_WINDOW_S = 24 * 3600
+BLIP_KEEP = 500        # cap on stored blip timestamps
+
+
+def iso_local(ts):
+    """Epoch seconds to ISO 8601 with the Pi's UTC offset, or None."""
+    if ts is None:
+        return None
+    return datetime.datetime.fromtimestamp(ts).astimezone().isoformat(timespec="seconds")
+
+
+class FeedTracker:
+    """Grid (AC input) presence with debounce and a persisted last-outage record.
+
+    Only fed from good block-0 reads, so a Modbus link failure is "unknown",
+    never an outage. The record survives restarts via FEED_FILE.
+    """
+
+    def __init__(self, path=FEED_FILE):
+        self.path = path
+        self.ok = None          # None until the first debounced decision
+        self.start = None       # epoch of the last outage start
+        self.end = None         # epoch of its end, None while ongoing
+        self.end_approx = False  # end time is when the script saw the grid again after a restart
+        self._run_state = None
+        self._run = 0
+        self._first_seen = None
+        self.blips = []           # epoch starts of blips (pruned to BLIP_WINDOW_S)
+        self.last_blip = None     # epoch start of the most recent blip (kept past 24 h)
+        self.last_blip_min_v = None
+        self._sag_start = None    # current run of sagging polls
+        self._sag_min = None
+        self._sag_outage = False  # this run turned into a full outage
+        try:
+            with open(path) as f:
+                d = json.load(f)
+            self.start = d.get("start")
+            self.end = d.get("end")
+            self.end_approx = bool(d.get("end_approx"))
+            self.blips = [float(t) for t in d.get("blips") or []]
+            self.last_blip = d.get("last_blip")
+            self.last_blip_min_v = d.get("last_blip_min_v")
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def _save(self):
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump({"start": self.start, "end": self.end, "end_approx": self.end_approx,
+                           "blips": self.blips, "last_blip": self.last_blip,
+                           "last_blip_min_v": self.last_blip_min_v}, f)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    @staticmethod
+    def grid_up(regs):
+        return regs[1] / 10.0 >= FEED_MIN_V and regs[2] / 10.0 >= FEED_MIN_HZ
+
+    def _prune(self, now):
+        self.blips = [t for t in self.blips if now - t < BLIP_WINDOW_S][-BLIP_KEEP:]
+
+    def _note_sag(self, regs, now):
+        v, hz = regs[1] / 10.0, regs[2] / 10.0
+        if v < FEED_SAG_V or hz < FEED_MIN_HZ:
+            if self._sag_start is None:
+                self._sag_start, self._sag_min, self._sag_outage = now, v, False
+            else:
+                self._sag_min = min(self._sag_min, v)
+            return
+        if self._sag_start is not None:
+            if not self._sag_outage:
+                self._prune(now)
+                self.blips.append(self._sag_start)
+                self.last_blip, self.last_blip_min_v = self._sag_start, round(self._sag_min, 1)
+                self._save()
+            self._sag_start = None
+
+    def note(self, regs, now=None):
+        now = time.time() if now is None else now
+        self._note_sag(regs, now)
+        up = self.grid_up(regs)
+        if up == self._run_state:
+            self._run += 1
+        else:
+            self._run_state, self._run = up, 1
+            self._first_seen = now
+        if self._run < FEED_DEBOUNCE or up == self.ok:
+            return
+        prev, self.ok = self.ok, up
+        if not up:
+            if self._sag_start is not None:
+                self._sag_outage = True  # a real outage, not a blip
+            if prev is None and self.start is not None and self.end is None:
+                return  # restarted during an outage that's already recorded
+            self.start, self.end, self.end_approx = self._first_seen, None, False
+            self._save()
+        elif self.start is not None and self.end is None:
+            # Grid back. If we only learn this right after startup, the real
+            # return time is unknown: use now and flag it.
+            self.end = self._first_seen
+            self.end_approx = prev is None
+            self._save()
+
+    def api(self):
+        secs = None
+        if self.start is not None:
+            secs = int(round((self.end if self.end is not None else time.time()) - self.start))
+        return {
+            "feed_ok": self.ok,
+            "last_outage_start": iso_local(self.start),
+            "last_outage_end": iso_local(self.end),
+            "last_outage_seconds": secs,
+            "last_outage_end_approx": self.end_approx if self.end is not None else None,
+            "last_blip_time": iso_local(self.last_blip),
+            "last_blip_min_voltage": self.last_blip_min_v,
+            "blips_24h": sum(1 for t in self.blips if time.time() - t < BLIP_WINDOW_S),
+        }
+
+
+feed = FeedTracker()
+
+
+class LinkStats:
+    """Pi -> inverter Modbus RTU frame stats. One frame = one block read
+    (2 per cycle). Dropped = timeout, bad CRC, short/garbled reply, or a
+    serial error. Counts are since script start plus a rolling hour."""
+
+    AVG_N = 100  # rolling average over the last N good frames
+
+    def __init__(self):
+        self.ok = 0
+        self.dropped = 0
+        self.last_ms = None
+        self._rtts = collections.deque(maxlen=self.AVG_N)
+        self._hour = collections.deque()  # (monotonic ts, ok?)
+
+    def _push(self, ok):
+        now = time.monotonic()
+        self._hour.append((now, ok))
+        while self._hour and now - self._hour[0][0] > 3600:
+            self._hour.popleft()
+
+    def good(self, rtt_ms):
+        self.ok += 1
+        self.last_ms = rtt_ms
+        self._rtts.append(rtt_ms)
+        self._push(True)
+
+    def drop(self):
+        self.dropped += 1
+        self._push(False)
+
+    def api(self):
+        total = self.ok + self.dropped
+        h_total = len(self._hour)
+        h_drop = sum(1 for _, ok in self._hour if not ok)
+        avg = sum(self._rtts) / len(self._rtts) if self._rtts else None
+        return {
+            "link_ms_last": None if self.last_ms is None else round(self.last_ms, 1),
+            "link_ms_avg": None if avg is None else round(avg, 1),
+            "frames_ok": self.ok,
+            "frames_dropped": self.dropped,
+            "frames_1h": h_total,
+            "frames_dropped_1h": h_drop,
+            "link_success_pct": None if total == 0 else round(100.0 * self.ok / total, 2),
+        }
+
+
+link_stats = LinkStats()
+
+
 api_state = {
     "started": time.time(),
     "lat1": None,
@@ -562,6 +1233,8 @@ def snapshot_now() -> dict:
         last_ok = api_state["last_ok"]
         charge_s = api_state["charge_s"]
         disch_s = api_state["disch_s"]
+        feed_api = feed.api()
+        link_api = link_stats.api()
     link = last_ok is not None and (time.time() - last_ok) <= 10.0
     fields = []
     for field in FIELDS:
@@ -593,6 +1266,8 @@ def snapshot_now() -> dict:
             {"latency_ms": lat2, "drops": drops2, "error": err2},
         ],
         "fields": fields,
+        **feed_api,
+        **link_api,
         "history": downsample_history(),
     }
 
@@ -660,13 +1335,88 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "http_port": HTTP_PORT,
                 },
             )
+        elif path == "/api/v1/settings":
+            self._json(200, settings_payload())
         elif path == "/":
             self._json(
                 200,
-                {"name": "POW-HVM6", "endpoints": ["/api/v1/now", "/api/v1/identity"]},
+                {
+                    "name": "POW-HVM6",
+                    "endpoints": [
+                        "GET /api/v1/now",
+                        "GET /api/v1/identity",
+                        "GET /api/v1/settings",
+                        "POST /api/v1/set",
+                    ],
+                },
             )
         else:
             self._json(404, {"error": "not found"})
+
+    def do_POST(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if path != "/api/v1/set":
+            self._json(404, {"error": "not found"})
+            return
+        # Requiring a JSON content type means a browser page on the LAN can't
+        # send this cross-origin without a preflight, which we never approve.
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            self._json(415, {"ok": False, "message": "Content-Type must be application/json"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 1024:
+            self._json(400, {"ok": False, "message": "bad body length"})
+            return
+        try:
+            body = json.loads(self.rfile.read(length))
+            key = body["key"]
+            value = body["value"]
+        except Exception:
+            self._json(400, {"ok": False, "message": 'body must be {"key": ..., "value": ...}'})
+            return
+        setting = SETTINGS_BY_KEY.get(key) if isinstance(key, str) else None
+        if setting is None:
+            self._json(404, {"ok": False, "message": f"unknown setting {key!r}"})
+            return
+        if not WRITES_ENABLED or not setting.get("enabled", True):
+            self._json(403, {"ok": False, "message": "writes are disabled for this setting"})
+            return
+        try:
+            value, raw = validate_value(setting, value)
+            with api_lock:
+                check_relations(setting, value)
+        except ValueError as exc:
+            self._json(422, {"ok": False, "message": str(exc), "options": option_list(setting)})
+            return
+        if body.get("dry_run"):
+            self._json(200, {"ok": True, "dry_run": True, "key": key, "value": value,
+                             "register": setting["write"]["register"], "raw": raw,
+                             "old": setting_current(setting)})
+            return
+        if not write_lock.acquire(timeout=10):
+            self._json(503, {"ok": False, "message": "another write is in progress"})
+            return
+        try:
+            job = WriteJob(setting, value, raw)
+            try:
+                write_jobs.put_nowait(job)
+            except queue.Full:
+                self._json(503, {"ok": False, "message": "write queue full"})
+                return
+            wake.set()
+            if not job.done.wait(15):
+                job.cancelled = True  # never run a write the client gave up on
+                self._json(504, {"ok": False, "message": "timed out waiting for the inverter (serial link down?)"})
+                return
+            result = job.result or {"ok": False, "message": "no result"}
+            log_write(key, result)
+            self._json(200 if result.get("ok") else 502, result)
+        finally:
+            write_lock.release()
 
 
 def start_api() -> None:
@@ -679,7 +1429,7 @@ def start_api() -> None:
 
 def discover_reply() -> bytes:
     return json.dumps(
-        {"name": "POW-HVM6", "model": "POW-HVM6.2M-48V-N", "http_port": HTTP_PORT}
+        {"name": "POW-HVM6", "model": MODEL, "http_port": HTTP_PORT, "api_version": API_VERSION}
     ).encode()
 
 
@@ -713,33 +1463,51 @@ def main() -> None:
             if ser is None or not ser.is_open:
                 ser = open_port()
             regs, rtt, err, dead = poll_block(ser, *BLOCK1)
+            with api_lock:
+                link_stats.drop() if err else link_stats.good(rtt)
             if err:
                 drops1 += 1
                 err1 = err
             else:
                 apply_block(0, regs)
+                with api_lock:
+                    last_blocks[0] = regs
                 lat1 = rtt
                 err1 = ""
                 remember(history, regs, activity)
+                with api_lock:
+                    feed.note(regs)
             if dead:
                 drops2 += 1
                 err2 = err1
+                with api_lock:
+                    link_stats.drop()
                 ser = close_port(ser)
             else:
                 regs, rtt, err, dead = poll_block(ser, *BLOCK2)
+                with api_lock:
+                    link_stats.drop() if err else link_stats.good(rtt)
                 if err:
                     drops2 += 1
                     err2 = err
                 else:
                     apply_block(1, regs)
+                    with api_lock:
+                        last_blocks[1] = regs
                     lat2 = rtt
                     err2 = ""
                 if dead:
                     ser = close_port(ser)
+            if ser is not None and not err1:
+                probe_settings_regs(ser)
+                process_write_jobs(ser)
         except Exception as exc:
             err1 = err2 = f"{type(exc).__name__}: {exc}"
             drops1 += 1
             drops2 += 1
+            with api_lock:
+                link_stats.drop()
+                link_stats.drop()
             ser = close_port(ser)
         charge_field.value = Activity.fmt(activity.charge_s)
         disch_field.value = Activity.fmt(activity.disch_s)
@@ -770,7 +1538,8 @@ def main() -> None:
         sys.stdout.flush()
         delay = INTERVAL - (time.monotonic() - t0)
         if delay > 0:
-            time.sleep(delay)
+            wake.wait(delay)
+            wake.clear()
 
 
 if __name__ == "__main__":

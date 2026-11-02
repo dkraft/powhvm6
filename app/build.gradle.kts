@@ -11,8 +11,8 @@ android {
         applicationId = "com.dkraft.powhvm6"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 10
+        versionName = "1.9"
     }
 
     buildTypes {
@@ -29,6 +29,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.14"

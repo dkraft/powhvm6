@@ -1,5 +1,6 @@
 package com.dkraft.powhvm6.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -26,8 +27,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.dkraft.powhvm6.HostAddr
 import com.dkraft.powhvm6.MainViewModel
 import com.dkraft.powhvm6.Settings
+import com.dkraft.powhvm6.ThemeMode
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 
 @Composable
 fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
@@ -47,6 +54,7 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                         value = hostText,
                         onValueChange = { hostText = it.trim() },
                         label = { Text("IP address or hostname") },
+                        placeholder = { Text("10.0.0.69 (port defaults to 8088)") },
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Uri),
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
@@ -54,9 +62,8 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = {
-                            hostText = hostText.trim()
+                            hostText = HostAddr.normalize(hostText)
                             if (hostText.isNotEmpty()) {
-                                vm.settings.host = hostText
                                 vm.startPolling(hostText)
                             }
                         }) { Text("Connect") }
@@ -68,22 +75,55 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
 
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Night mode", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "Dark background for low-light use.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                        )
-                    }
-                    Switch(
-                        checked = vm.settings.nightMode,
-                        onCheckedChange = { vm.settings.nightMode = it }
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Inverter settings", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Values the Pi can change on the inverter. Each change is confirmed and read back.",
+                        style = MaterialTheme.typography.bodySmall
                     )
+                    Spacer(Modifier.height(8.dp))
+                    val msg = vm.settingsMessage
+                    if (msg != null) Text(msg, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                    for (d in vm.settingDefs) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth()
+                                .then(if (d.enabled) Modifier.clickable { vm.beginEdit(key = d.key) } else Modifier)
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(d.label, style = MaterialTheme.typography.bodyLarge)
+                                if (!d.enabled) Text("read-only", style = MaterialTheme.typography.labelSmall)
+                            }
+                            Text(d.labelFor(d.current), style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                    TextButton(onClick = { vm.loadSettings() }) { Text("Refresh") }
+                }
+            }
+        }
+
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Night mode", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "System follows your phone's dark theme setting.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    ThemeModeSelector(vm)
+                }
+            }
+        }
+
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Temperature unit", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(12.dp))
+                    TempUnitSelector(vm)
                 }
             }
         }
@@ -106,6 +146,36 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ThemeModeSelector(vm: MainViewModel) {
+    val modes = ThemeMode.values()
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        modes.forEachIndexed { i, mode ->
+            SegmentedButton(
+                selected = vm.themeMode == mode,
+                onClick = { vm.updateThemeMode(mode) },
+                shape = SegmentedButtonDefaults.itemShape(index = i, count = modes.size)
+            ) { Text(mode.label) }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TempUnitSelector(vm: MainViewModel) {
+    val units = com.dkraft.powhvm6.TempUnit.values()
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        units.forEachIndexed { i, u ->
+            SegmentedButton(
+                selected = vm.tempUnit == u,
+                onClick = { vm.updateTempUnit(u) },
+                shape = SegmentedButtonDefaults.itemShape(index = i, count = units.size)
+            ) { Text(u.label) }
+        }
+    }
+}
+
 @Composable
 fun FieldToggles(vm: MainViewModel) {
     // Use the last known snapshot's field list. If none yet, use a fallback.
@@ -122,6 +192,8 @@ fun FieldToggles(vm: MainViewModel) {
 
     val groups = linkedMapOf<String, MutableList<com.dkraft.powhvm6.Field>>()
     for (f in fields) groups.getOrPut(f.group) { mutableListOf() }.add(f)
+    com.dkraft.powhvm6.feedField(snap?.feed)?.let { groups.getOrPut(it.group) { mutableListOf() }.add(0, it) }
+    for (f in com.dkraft.powhvm6.linkFields(vm.appLink, snap?.piLink)) groups.getOrPut(f.group) { mutableListOf() }.add(f)
 
     for ((g, list) in groups) {
         Text(
@@ -141,8 +213,8 @@ fun FieldToggles(vm: MainViewModel) {
                     modifier = Modifier.weight(1f)
                 )
                 Switch(
-                    checked = vm.settings.isFieldVisible(f.id),
-                    onCheckedChange = { vm.settings.setFieldVisible(f.id, it) }
+                    checked = vm.isFieldVisible(f.id),
+                    onCheckedChange = { vm.setFieldVisible(f.id, it) }
                 )
             }
         }

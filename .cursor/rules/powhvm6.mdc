@@ -1,0 +1,13 @@
+---
+description: powhvm6 project rules (inverter safety, deploy, release)
+alwaysApply: true
+---
+
+Before working in this repo, read `CONTRIBUTING.md` (and `SETTINGS.md` for inverter settings).
+
+- This drives a real PowMr inverter and LiFePO4 bank. Don't change a real setting without the owner's explicit confirmation. To test, use `dry_run` or a same-value write.
+- Only write through the validated settings registry (`SETTINGS` in `hdmi-inverter.py`). Never add a raw Modbus or command passthrough.
+- 45xx status words are little-endian; 50xx settings registers are big-endian. Voltages are ×10.
+- Enforce `float ≤ bulk`. Lower float before bulk, and raise bulk before float.
+- Back up the Pi script before deploying, and respawn tmux pane `main:0.0` instead of restarting the service.
+- Never commit or print secrets. The release keystore is kept privately, and every release uses the same key.
