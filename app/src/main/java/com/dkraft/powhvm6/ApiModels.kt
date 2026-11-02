@@ -8,7 +8,7 @@ data class Field(
     val group: String,
     val text: String,
     val number: Double?,
-    /** 0 neutral, 1 good (green), 2 alert (red). Only set by the app (Feed tile). */
+    /** 0 neutral, 1 good (green), 2 alert (red), 3 warning (amber). Only set by the app (Feed tile). */
     val tone: Int = 0,
     /** Optional smaller line under the value. */
     val sub: String? = null
@@ -20,8 +20,34 @@ data class FeedInfo(
     val outageStartMs: Long?,
     val outageEndMs: Long?,
     val outageSeconds: Long?,
-    val endApprox: Boolean
+    val endApprox: Boolean,
+    val lastBlipMs: Long? = null,
+    val lastBlipMinV: Double? = null,
+    val blips24h: Int = 0
 )
+
+/** Pi -> inverter Modbus frame stats from /api/v1/now (Pi script v1.8+). */
+data class PiLink(
+    val msLast: Double?,
+    val msAvg: Double?,
+    val framesOk: Long,
+    val framesDropped: Long,
+    val frames1h: Long,
+    val dropped1h: Long,
+    val successPct: Double?
+)
+
+/** App -> Pi /api/v1/now fetch stats, kept by the view model. */
+data class AppLink(
+    val msLast: Double? = null,
+    val recent: List<Double> = emptyList(),
+    val ok: Long = 0,
+    val failed: Long = 0
+) {
+    val msAvg: Double? get() = if (recent.isEmpty()) null else recent.average()
+    fun good(ms: Double) = copy(msLast = ms, recent = (recent + ms).takeLast(30), ok = ok + 1)
+    fun bad() = copy(failed = failed + 1)
+}
 
 data class HistoryPoint(
     val ageS: Double,
@@ -37,7 +63,9 @@ data class Snapshot(
     val fields: List<Field>,
     val history: List<HistoryPoint>,
     /** Null when the Pi script predates the feed fields. */
-    val feed: FeedInfo? = null
+    val feed: FeedInfo? = null,
+    /** Null when the Pi script predates the link stats. */
+    val piLink: PiLink? = null
 )
 
 object Api {
@@ -72,7 +100,8 @@ object Api {
             upSince = o.optDouble("up_since"),
             fields = fields,
             history = hist,
-            feed = parseFeed(o)
+            feed = parseFeed(o),
+            piLink = parsePiLink(o)
         )
     }
 
@@ -87,7 +116,26 @@ object Api {
             outageStartMs = isoMs(o, "last_outage_start"),
             outageEndMs = isoMs(o, "last_outage_end"),
             outageSeconds = if (o.isNull("last_outage_seconds") || !o.has("last_outage_seconds")) null else o.getLong("last_outage_seconds"),
-            endApprox = o.optBoolean("last_outage_end_approx", false)
+            endApprox = o.optBoolean("last_outage_end_approx", false),
+            lastBlipMs = isoMs(o, "last_blip_time"),
+            lastBlipMinV = if (!o.has("last_blip_min_voltage") || o.isNull("last_blip_min_voltage")) null else o.getDouble("last_blip_min_voltage"),
+            blips24h = o.optInt("blips_24h", 0)
+        )
+    }
+
+    private fun optD(o: JSONObject, k: String): Double? =
+        if (!o.has(k) || o.isNull(k)) null else o.optDouble(k).takeIf { !it.isNaN() }
+
+    private fun parsePiLink(o: JSONObject): PiLink? {
+        if (!o.has("frames_ok")) return null
+        return PiLink(
+            msLast = optD(o, "link_ms_last"),
+            msAvg = optD(o, "link_ms_avg"),
+            framesOk = o.optLong("frames_ok"),
+            framesDropped = o.optLong("frames_dropped"),
+            frames1h = o.optLong("frames_1h"),
+            dropped1h = o.optLong("frames_dropped_1h"),
+            successPct = optD(o, "link_success_pct")
         )
     }
 
@@ -248,6 +296,7 @@ fun feedField(feed: FeedInfo?, nowMs: Long = System.currentTimeMillis()): Field?
     feed ?: return null
     val start = feed.outageStartMs
     val end = feed.outageEndMs
+    val blip = feed.lastBlipMs
     return when {
         feed.ok == false -> Field("feed", "Feed", "status",
             if (start != null) "Down since ${fmtWhen(start, nowMs)}" else "Down",
@@ -258,7 +307,35 @@ fun feedField(feed: FeedInfo?, nowMs: Long = System.currentTimeMillis()): Field?
         start != null && end != null && nowMs - end < FEED_ALERT_MS -> Field("feed", "Feed", "status",
             "Last out ${fmtWhen(start, nowMs)} · ${if (feed.endApprox) "~" else ""}${fmtDuration(feed.outageSeconds ?: ((end - start) / 1000))}",
             null, tone = 2)
+        blip != null && nowMs - blip < FEED_ALERT_MS -> Field("feed", "Feed", "status",
+            "Blip ${fmtWhen(blip, nowMs)}" + (if (feed.blips24h > 1) " · ${feed.blips24h} in 24 h" else ""),
+            null, tone = 3,
+            sub = feed.lastBlipMinV?.let { String.format(java.util.Locale.US, "min %.0f V", it) })
         else -> Field("feed", "Feed", "status", "OK", null, tone = 1,
-            sub = if (start != null) "Last out ${fmtWhen(start, nowMs)}" else null)
+            sub = when {
+                start != null -> "Last out ${fmtWhen(start, nowMs)}"
+                blip != null -> "Last blip ${fmtWhen(blip, nowMs)}"
+                else -> null
+            })
     }
+}
+
+private fun ms(v: Double?): String = if (v == null) "—" else String.format(java.util.Locale.US, "%.0f ms", v)
+
+/** Compact link diagnostics for the bottom "Link" card. Pi tile only if the script reports it. */
+fun linkFields(app: AppLink?, pi: PiLink?): List<Field> {
+    val out = mutableListOf<Field>()
+    if (app != null) {
+        val tot = app.ok + app.failed
+        out += Field("diag_app", "App → Pi", "link",
+            "${ms(app.msLast)} · avg ${ms(app.msAvg)}", null,
+            sub = "dropped ${app.failed}" + if (tot > 0) String.format(java.util.Locale.US, " · %.1f%% ok", 100.0 * app.ok / tot) else "")
+    }
+    if (pi != null) {
+        out += Field("diag_pi", "Pi → inverter", "link",
+            "${ms(pi.msLast)} · avg ${ms(pi.msAvg)}", null,
+            sub = "dropped ${pi.framesDropped} · 1 h ${pi.dropped1h}" +
+                (pi.successPct?.let { String.format(java.util.Locale.US, " · %.1f%% ok", it) } ?: ""))
+    }
+    return out
 }

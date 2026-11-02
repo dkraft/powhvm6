@@ -14,6 +14,7 @@ green while the battery is charging, red while it is discharging, and
 cyan while it is doing neither. Charge mins and disch mins count time
 in those states since this screen started.
 """
+import collections
 import datetime
 import json
 import math
@@ -524,8 +525,8 @@ SETTINGS = [
         # Program 03. 5019, mirrored in 4538 (block 0, index 37). Raw values
         # from odya docs/registers-map.md ("0 - 90-280VAC, 1 - 170-280VAC") and
         # src/modules/inverter.yaml (0 Appliances, 1 UPS); the 6.2 kW manual lists
-        # APL (default) then UPS. 0 = Appliances matches this unit's live reading;
-        # 1 = UPS is from those sources only, not yet seen on this unit.
+        # APL (default) then UPS. Both seen on this unit (4538 read 0, then 1
+        # after a UPS write on 2026-11-01).
         "key": "ac_input_range",
         "label": "AC range",
         "description": "AC input voltage range accepted from the grid",
@@ -538,7 +539,7 @@ SETTINGS = [
             0: "Appliances (90-280 V, wide)",
             1: "UPS (170-280 V, narrow, faster transfer)"}},
         "enabled": True,
-        "note": "UPS drops the grid below about 170 V. On a 120 V grid that likely means the inverter won't accept utility at all.",
+        "note": "Appliances accepts 90-280 V input. UPS accepts 170-280 V and switches to battery faster.",
     },
 ]
 SETTINGS_BY_KEY = {s["key"]: s for s in SETTINGS}
@@ -1027,6 +1028,9 @@ FEED_FILE = os.path.expanduser("~/powhvm6-feed.json")
 FEED_MIN_V = 80.0      # AC input below this (or below FEED_MIN_HZ) counts as no grid
 FEED_MIN_HZ = 40.0
 FEED_DEBOUNCE = 3      # consecutive good block-0 polls (~6 s at INTERVAL 2 s) to change state
+FEED_SAG_V = 200.0     # blip: any good poll below this (or FEED_MIN_HZ) that doesn't become an outage
+BLIP_WINDOW_S = 24 * 3600
+BLIP_KEEP = 500        # cap on stored blip timestamps
 
 
 def iso_local(ts):
@@ -1052,20 +1056,31 @@ class FeedTracker:
         self._run_state = None
         self._run = 0
         self._first_seen = None
+        self.blips = []           # epoch starts of blips (pruned to BLIP_WINDOW_S)
+        self.last_blip = None     # epoch start of the most recent blip (kept past 24 h)
+        self.last_blip_min_v = None
+        self._sag_start = None    # current run of sagging polls
+        self._sag_min = None
+        self._sag_outage = False  # this run turned into a full outage
         try:
             with open(path) as f:
                 d = json.load(f)
             self.start = d.get("start")
             self.end = d.get("end")
             self.end_approx = bool(d.get("end_approx"))
-        except (OSError, ValueError):
+            self.blips = [float(t) for t in d.get("blips") or []]
+            self.last_blip = d.get("last_blip")
+            self.last_blip_min_v = d.get("last_blip_min_v")
+        except (OSError, ValueError, TypeError):
             pass
 
     def _save(self):
         tmp = self.path + ".tmp"
         try:
             with open(tmp, "w") as f:
-                json.dump({"start": self.start, "end": self.end, "end_approx": self.end_approx}, f)
+                json.dump({"start": self.start, "end": self.end, "end_approx": self.end_approx,
+                           "blips": self.blips, "last_blip": self.last_blip,
+                           "last_blip_min_v": self.last_blip_min_v}, f)
             os.replace(tmp, self.path)
         except OSError:
             pass
@@ -1074,8 +1089,28 @@ class FeedTracker:
     def grid_up(regs):
         return regs[1] / 10.0 >= FEED_MIN_V and regs[2] / 10.0 >= FEED_MIN_HZ
 
+    def _prune(self, now):
+        self.blips = [t for t in self.blips if now - t < BLIP_WINDOW_S][-BLIP_KEEP:]
+
+    def _note_sag(self, regs, now):
+        v, hz = regs[1] / 10.0, regs[2] / 10.0
+        if v < FEED_SAG_V or hz < FEED_MIN_HZ:
+            if self._sag_start is None:
+                self._sag_start, self._sag_min, self._sag_outage = now, v, False
+            else:
+                self._sag_min = min(self._sag_min, v)
+            return
+        if self._sag_start is not None:
+            if not self._sag_outage:
+                self._prune(now)
+                self.blips.append(self._sag_start)
+                self.last_blip, self.last_blip_min_v = self._sag_start, round(self._sag_min, 1)
+                self._save()
+            self._sag_start = None
+
     def note(self, regs, now=None):
         now = time.time() if now is None else now
+        self._note_sag(regs, now)
         up = self.grid_up(regs)
         if up == self._run_state:
             self._run += 1
@@ -1086,6 +1121,8 @@ class FeedTracker:
             return
         prev, self.ok = self.ok, up
         if not up:
+            if self._sag_start is not None:
+                self._sag_outage = True  # a real outage, not a blip
             if prev is None and self.start is not None and self.end is None:
                 return  # restarted during an outage that's already recorded
             self.start, self.end, self.end_approx = self._first_seen, None, False
@@ -1107,10 +1144,62 @@ class FeedTracker:
             "last_outage_end": iso_local(self.end),
             "last_outage_seconds": secs,
             "last_outage_end_approx": self.end_approx if self.end is not None else None,
+            "last_blip_time": iso_local(self.last_blip),
+            "last_blip_min_voltage": self.last_blip_min_v,
+            "blips_24h": sum(1 for t in self.blips if time.time() - t < BLIP_WINDOW_S),
         }
 
 
 feed = FeedTracker()
+
+
+class LinkStats:
+    """Pi -> inverter Modbus RTU frame stats. One frame = one block read
+    (2 per cycle). Dropped = timeout, bad CRC, short/garbled reply, or a
+    serial error. Counts are since script start plus a rolling hour."""
+
+    AVG_N = 100  # rolling average over the last N good frames
+
+    def __init__(self):
+        self.ok = 0
+        self.dropped = 0
+        self.last_ms = None
+        self._rtts = collections.deque(maxlen=self.AVG_N)
+        self._hour = collections.deque()  # (monotonic ts, ok?)
+
+    def _push(self, ok):
+        now = time.monotonic()
+        self._hour.append((now, ok))
+        while self._hour and now - self._hour[0][0] > 3600:
+            self._hour.popleft()
+
+    def good(self, rtt_ms):
+        self.ok += 1
+        self.last_ms = rtt_ms
+        self._rtts.append(rtt_ms)
+        self._push(True)
+
+    def drop(self):
+        self.dropped += 1
+        self._push(False)
+
+    def api(self):
+        total = self.ok + self.dropped
+        h_total = len(self._hour)
+        h_drop = sum(1 for _, ok in self._hour if not ok)
+        avg = sum(self._rtts) / len(self._rtts) if self._rtts else None
+        return {
+            "link_ms_last": None if self.last_ms is None else round(self.last_ms, 1),
+            "link_ms_avg": None if avg is None else round(avg, 1),
+            "frames_ok": self.ok,
+            "frames_dropped": self.dropped,
+            "frames_1h": h_total,
+            "frames_dropped_1h": h_drop,
+            "link_success_pct": None if total == 0 else round(100.0 * self.ok / total, 2),
+        }
+
+
+link_stats = LinkStats()
 
 
 api_state = {
@@ -1145,6 +1234,7 @@ def snapshot_now() -> dict:
         charge_s = api_state["charge_s"]
         disch_s = api_state["disch_s"]
         feed_api = feed.api()
+        link_api = link_stats.api()
     link = last_ok is not None and (time.time() - last_ok) <= 10.0
     fields = []
     for field in FIELDS:
@@ -1177,6 +1267,7 @@ def snapshot_now() -> dict:
         ],
         "fields": fields,
         **feed_api,
+        **link_api,
         "history": downsample_history(),
     }
 
@@ -1372,6 +1463,8 @@ def main() -> None:
             if ser is None or not ser.is_open:
                 ser = open_port()
             regs, rtt, err, dead = poll_block(ser, *BLOCK1)
+            with api_lock:
+                link_stats.drop() if err else link_stats.good(rtt)
             if err:
                 drops1 += 1
                 err1 = err
@@ -1387,9 +1480,13 @@ def main() -> None:
             if dead:
                 drops2 += 1
                 err2 = err1
+                with api_lock:
+                    link_stats.drop()
                 ser = close_port(ser)
             else:
                 regs, rtt, err, dead = poll_block(ser, *BLOCK2)
+                with api_lock:
+                    link_stats.drop() if err else link_stats.good(rtt)
                 if err:
                     drops2 += 1
                     err2 = err
@@ -1408,6 +1505,9 @@ def main() -> None:
             err1 = err2 = f"{type(exc).__name__}: {exc}"
             drops1 += 1
             drops2 += 1
+            with api_lock:
+                link_stats.drop()
+                link_stats.drop()
             ser = close_port(ser)
         charge_field.value = Activity.fmt(activity.charge_s)
         disch_field.value = Activity.fmt(activity.disch_s)

@@ -42,6 +42,7 @@ import com.dkraft.powhvm6.MainViewModel
 import com.dkraft.powhvm6.Snapshot
 import com.dkraft.powhvm6.displayText
 import com.dkraft.powhvm6.feedField
+import com.dkraft.powhvm6.linkFields
 
 @Composable
 fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
@@ -131,6 +132,11 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         if (snap.history.isNotEmpty()) {
             item { HistoryCard(snap.history) }
         }
+
+        val link = linkFields(vm.appLink, snap.piLink).filter { vm.isFieldVisible(it.id) }
+        if (link.isNotEmpty()) {
+            item { GroupCard("Link", link) }
+        }
     }
 }
 
@@ -202,6 +208,7 @@ fun FieldCell(
                 color = when (field.tone) {
                     1 -> Color(0xFF4CAF50)
                     2 -> Color(0xFFE53935)
+                    3 -> Color(0xFFFFA000)
                     else -> Color.Unspecified
                 }
             )

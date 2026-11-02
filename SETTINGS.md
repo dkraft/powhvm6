@@ -23,7 +23,7 @@ Enabled today:
 * Bulk/Float need program 05 = User-defined (reg 5020 = 2). The API rejects Float above Bulk, so to lower both, write Float first; to raise both, write Bulk first.
 * Program 13's LCD option "FUL" (battery fully charged) is **not** offered: its raw register value isn't documented.
 * **Enum raw values.** Confirmed on this unit by reading: 5018 = 0 shows Utility first and 5017 = 1 shows Solar first, and same-value writes of both were acked and read back. The other values (5018: 1 Solar first, 2 SBU; 5017: 2 Solar + utility, 3 Only solar) come from the odya ESPHome PowMr config, which was tested on the HVM2.4H/10.2M, not on this unit. The option order matches the 6.2M manual. Verify on the LCD after the first real change.
-* **AC range (5019).** 0 = Appliances is confirmed on this unit by reading (4538 = 0, matching the Appliance mode David has set). 1 = UPS comes from two odya sources (`docs/registers-map.md`: "0 - 90-280VAC, 1 - 170-280VAC"; `inverter.yaml`: 0 Appliances, 1 UPS). The order matches the 6.2M manual (APL default, then UPS). High confidence, but not yet seen on this unit. This inverter is a 220 V model on a 120 V grid, so UPS (≥ 170 V) would most likely stop it accepting utility at all.
+* **AC range (5019).** 0 = Appliances (90–280 V) and 1 = UPS (170–280 V, faster transfer to battery). Both values have been read back on this unit (4538 = 0, then 1 after a UPS write on 2026-11-01), matching odya `docs/registers-map.md`, `inverter.yaml` and the 6.2M manual order. The grid here reads about 243 V / 60 Hz, so either range accepts it.
 * Left out on purpose: output mode **MKS** (in the 6.2M manual, raw value unknown) and charger **0 = Utility first** (not an option in the 6.2M manual).
 
 ## Protocol facts (POW-HVM6.2M-48V-N, Modbus RTU)
@@ -114,7 +114,7 @@ Each setting has `key, label, description, unit, field_id, menu, type, options[{
 
 Every write the poll thread runs (success or failure) is appended to `~pi/powhvm6-writes.log` as one JSON line. Requests rejected before queuing (4xx) and 504 timeouts are not logged.
 
-`GET /api/v1/now` also carries read-only grid feed state (v1.7+): `feed_ok`, `last_outage_start`, `last_outage_end`, `last_outage_seconds`, `last_outage_end_approx`. These come from AC input voltage/frequency readings, not a setting; see CONTRIBUTING.md (Feed tracker).
+`GET /api/v1/now` also carries read-only grid feed state (v1.7+): `feed_ok`, `last_outage_start`, `last_outage_end`, `last_outage_seconds`, `last_outage_end_approx`, and blips (v1.8+): `last_blip_time`, `last_blip_min_voltage`, `blips_24h`. Link stats (v1.8+): `link_ms_last`, `link_ms_avg`, `frames_ok`, `frames_dropped`, `frames_1h`, `frames_dropped_1h`, `link_success_pct`. These come from AC input voltage/frequency readings, not a setting; see CONTRIBUTING.md (Feed tracker).
 
 ## Safety
 

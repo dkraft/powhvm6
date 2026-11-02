@@ -18,6 +18,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var snapshot by mutableStateOf<Snapshot?>(null)
         private set
     var error by mutableStateOf<String?>(null)
+
+    /** App -> Pi fetch round-trip and failures since polling (re)started. */
+    var appLink by mutableStateOf(AppLink())
         private set
     var busy by mutableStateOf(false)
         private set
@@ -78,17 +81,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         settings.host = host
         snapshot = null
         error = null
+        appLink = AppLink()
         settingDefs = emptyList()
         settingsMessage = null
         loadSettings()
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
             while (true) {
+                val t0 = System.nanoTime()
                 try {
                     val s = withContext(Dispatchers.IO) { Api.fetchNow(host) }
+                    appLink = appLink.good((System.nanoTime() - t0) / 1e6)
                     snapshot = s
                     error = null
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (e: Exception) {
+                    appLink = appLink.bad()
                     error = e.message ?: e::class.java.simpleName
                 }
                 delay(2000)
