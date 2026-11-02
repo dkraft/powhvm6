@@ -41,6 +41,7 @@ import com.dkraft.powhvm6.HistoryPoint
 import com.dkraft.powhvm6.MainViewModel
 import com.dkraft.powhvm6.Snapshot
 import com.dkraft.powhvm6.displayText
+import com.dkraft.powhvm6.feedField
 
 @Composable
 fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
@@ -78,6 +79,10 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val groups = linkedMapOf<String, MutableList<Field>>()
     val unit = vm.tempUnit
     for (f in visible) groups.getOrPut(f.group) { mutableListOf() }.add(f.copy(text = f.displayText(unit)))
+    // Feed tile goes first in Status. The Pi script may predate it (feed == null): no tile.
+    feedField(snap.feed)?.let { feed ->
+        if (vm.isFieldVisible(feed.id)) groups.getOrPut(feed.group) { mutableListOf() }.add(0, feed)
+    }
 
     val editable = vm.editableFieldIds()
 
@@ -193,8 +198,20 @@ fun FieldCell(
             Text(
                 text = field.text,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
+                fontWeight = FontWeight.SemiBold,
+                color = when (field.tone) {
+                    1 -> Color(0xFF4CAF50)
+                    2 -> Color(0xFFE53935)
+                    else -> Color.Unspecified
+                }
             )
+            if (field.sub != null) {
+                Text(
+                    text = field.sub,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+            }
             val perBattery = perBatteryVolts(field)
             if (perBattery != null) {
                 Text(

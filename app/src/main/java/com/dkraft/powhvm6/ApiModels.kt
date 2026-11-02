@@ -7,7 +7,20 @@ data class Field(
     val label: String,
     val group: String,
     val text: String,
-    val number: Double?
+    val number: Double?,
+    /** 0 neutral, 1 good (green), 2 alert (red). Only set by the app (Feed tile). */
+    val tone: Int = 0,
+    /** Optional smaller line under the value. */
+    val sub: String? = null
+)
+
+/** Grid feed state from /api/v1/now (Pi script v1.7+). Times are epoch millis. */
+data class FeedInfo(
+    val ok: Boolean?,
+    val outageStartMs: Long?,
+    val outageEndMs: Long?,
+    val outageSeconds: Long?,
+    val endApprox: Boolean
 )
 
 data class HistoryPoint(
@@ -22,7 +35,9 @@ data class Snapshot(
     val linkOk: Boolean,
     val upSince: Double,
     val fields: List<Field>,
-    val history: List<HistoryPoint>
+    val history: List<HistoryPoint>,
+    /** Null when the Pi script predates the feed fields. */
+    val feed: FeedInfo? = null
 )
 
 object Api {
@@ -56,7 +71,23 @@ object Api {
             linkOk = o.optBoolean("link_ok"),
             upSince = o.optDouble("up_since"),
             fields = fields,
-            history = hist
+            history = hist,
+            feed = parseFeed(o)
+        )
+    }
+
+    private fun isoMs(o: JSONObject, k: String): Long? =
+        if (!o.has(k) || o.isNull(k)) null
+        else runCatching { java.time.OffsetDateTime.parse(o.getString(k)).toInstant().toEpochMilli() }.getOrNull()
+
+    private fun parseFeed(o: JSONObject): FeedInfo? {
+        if (!o.has("feed_ok")) return null
+        return FeedInfo(
+            ok = if (o.isNull("feed_ok")) null else o.getBoolean("feed_ok"),
+            outageStartMs = isoMs(o, "last_outage_start"),
+            outageEndMs = isoMs(o, "last_outage_end"),
+            outageSeconds = if (o.isNull("last_outage_seconds") || !o.has("last_outage_seconds")) null else o.getLong("last_outage_seconds"),
+            endApprox = o.optBoolean("last_outage_end_approx", false)
         )
     }
 
@@ -190,5 +221,44 @@ object SettingsApi {
             old = if (o.isNull("old") || !o.has("old")) null else o.optDouble("old"),
             readback = if (o.isNull("readback") || !o.has("readback")) null else o.optDouble("readback")
         )
+    }
+}
+
+
+/** How long a past outage keeps the Feed tile red. */
+const val FEED_ALERT_MS = 24L * 3600 * 1000
+
+private fun fmtWhen(ms: Long, nowMs: Long): String {
+    val zone = java.time.ZoneId.systemDefault()
+    val t = java.time.Instant.ofEpochMilli(ms).atZone(zone)
+    val today = java.time.Instant.ofEpochMilli(nowMs).atZone(zone).toLocalDate()
+    val time = java.time.format.DateTimeFormatter.ofPattern("h:mm a", java.util.Locale.US)
+    return if (t.toLocalDate() == today) t.format(time)
+    else t.format(java.time.format.DateTimeFormatter.ofPattern("MMM d, h:mm a", java.util.Locale.US))
+}
+
+fun fmtDuration(seconds: Long): String = when {
+    seconds < 60 -> "$seconds s"
+    seconds < 3600 -> "${seconds / 60} min"
+    else -> { val h = seconds / 3600; val m = (seconds % 3600) / 60; if (m == 0L) "$h h" else "$h h $m min" }
+}
+
+/** The dashboard "Feed" tile (Status group), or null if the Pi doesn't report feed state. */
+fun feedField(feed: FeedInfo?, nowMs: Long = System.currentTimeMillis()): Field? {
+    feed ?: return null
+    val start = feed.outageStartMs
+    val end = feed.outageEndMs
+    return when {
+        feed.ok == false -> Field("feed", "Feed", "status",
+            if (start != null) "Down since ${fmtWhen(start, nowMs)}" else "Down",
+            null, tone = 2,
+            sub = if (start != null) "for ${fmtDuration((nowMs - start) / 1000)}" else null)
+        feed.ok == null -> Field("feed", "Feed", "status", "—", null,
+            sub = if (start != null) "Last out ${fmtWhen(start, nowMs)}" else null)
+        start != null && end != null && nowMs - end < FEED_ALERT_MS -> Field("feed", "Feed", "status",
+            "Last out ${fmtWhen(start, nowMs)} · ${if (feed.endApprox) "~" else ""}${fmtDuration(feed.outageSeconds ?: ((end - start) / 1000))}",
+            null, tone = 2)
+        else -> Field("feed", "Feed", "status", "OK", null, tone = 1,
+            sub = if (start != null) "Last out ${fmtWhen(start, nowMs)}" else null)
     }
 }

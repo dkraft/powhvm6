@@ -192,6 +192,7 @@ fun FieldToggles(vm: MainViewModel) {
 
     val groups = linkedMapOf<String, MutableList<com.dkraft.powhvm6.Field>>()
     for (f in fields) groups.getOrPut(f.group) { mutableListOf() }.add(f)
+    com.dkraft.powhvm6.feedField(snap?.feed)?.let { groups.getOrPut(it.group) { mutableListOf() }.add(0, it) }
 
     for ((g, list) in groups) {
         Text(

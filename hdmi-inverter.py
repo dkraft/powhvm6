@@ -14,6 +14,7 @@ green while the battery is charging, red while it is discharging, and
 cyan while it is doing neither. Charge mins and disch mins count time
 in those states since this screen started.
 """
+import datetime
 import json
 import math
 import os
@@ -1022,6 +1023,96 @@ class Activity:
 # Shared API state. The poll thread writes, HTTP threads read.
 history: deque = deque(maxlen=HISTORY_KEEP)
 history_lock = threading.Lock()
+FEED_FILE = os.path.expanduser("~/powhvm6-feed.json")
+FEED_MIN_V = 80.0      # AC input below this (or below FEED_MIN_HZ) counts as no grid
+FEED_MIN_HZ = 40.0
+FEED_DEBOUNCE = 3      # consecutive good block-0 polls (~6 s at INTERVAL 2 s) to change state
+
+
+def iso_local(ts):
+    """Epoch seconds to ISO 8601 with the Pi's UTC offset, or None."""
+    if ts is None:
+        return None
+    return datetime.datetime.fromtimestamp(ts).astimezone().isoformat(timespec="seconds")
+
+
+class FeedTracker:
+    """Grid (AC input) presence with debounce and a persisted last-outage record.
+
+    Only fed from good block-0 reads, so a Modbus link failure is "unknown",
+    never an outage. The record survives restarts via FEED_FILE.
+    """
+
+    def __init__(self, path=FEED_FILE):
+        self.path = path
+        self.ok = None          # None until the first debounced decision
+        self.start = None       # epoch of the last outage start
+        self.end = None         # epoch of its end, None while ongoing
+        self.end_approx = False  # end time is when the script saw the grid again after a restart
+        self._run_state = None
+        self._run = 0
+        self._first_seen = None
+        try:
+            with open(path) as f:
+                d = json.load(f)
+            self.start = d.get("start")
+            self.end = d.get("end")
+            self.end_approx = bool(d.get("end_approx"))
+        except (OSError, ValueError):
+            pass
+
+    def _save(self):
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump({"start": self.start, "end": self.end, "end_approx": self.end_approx}, f)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    @staticmethod
+    def grid_up(regs):
+        return regs[1] / 10.0 >= FEED_MIN_V and regs[2] / 10.0 >= FEED_MIN_HZ
+
+    def note(self, regs, now=None):
+        now = time.time() if now is None else now
+        up = self.grid_up(regs)
+        if up == self._run_state:
+            self._run += 1
+        else:
+            self._run_state, self._run = up, 1
+            self._first_seen = now
+        if self._run < FEED_DEBOUNCE or up == self.ok:
+            return
+        prev, self.ok = self.ok, up
+        if not up:
+            if prev is None and self.start is not None and self.end is None:
+                return  # restarted during an outage that's already recorded
+            self.start, self.end, self.end_approx = self._first_seen, None, False
+            self._save()
+        elif self.start is not None and self.end is None:
+            # Grid back. If we only learn this right after startup, the real
+            # return time is unknown: use now and flag it.
+            self.end = self._first_seen
+            self.end_approx = prev is None
+            self._save()
+
+    def api(self):
+        secs = None
+        if self.start is not None:
+            secs = int(round((self.end if self.end is not None else time.time()) - self.start))
+        return {
+            "feed_ok": self.ok,
+            "last_outage_start": iso_local(self.start),
+            "last_outage_end": iso_local(self.end),
+            "last_outage_seconds": secs,
+            "last_outage_end_approx": self.end_approx if self.end is not None else None,
+        }
+
+
+feed = FeedTracker()
+
+
 api_state = {
     "started": time.time(),
     "lat1": None,
@@ -1053,6 +1144,7 @@ def snapshot_now() -> dict:
         last_ok = api_state["last_ok"]
         charge_s = api_state["charge_s"]
         disch_s = api_state["disch_s"]
+        feed_api = feed.api()
     link = last_ok is not None and (time.time() - last_ok) <= 10.0
     fields = []
     for field in FIELDS:
@@ -1084,6 +1176,7 @@ def snapshot_now() -> dict:
             {"latency_ms": lat2, "drops": drops2, "error": err2},
         ],
         "fields": fields,
+        **feed_api,
         "history": downsample_history(),
     }
 
@@ -1289,6 +1382,8 @@ def main() -> None:
                 lat1 = rtt
                 err1 = ""
                 remember(history, regs, activity)
+                with api_lock:
+                    feed.note(regs)
             if dead:
                 drops2 += 1
                 err2 = err1

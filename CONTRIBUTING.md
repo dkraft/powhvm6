@@ -58,12 +58,14 @@ Android app ── HTTP GET /api/v1/now every 2 s, /settings on demand, POST /se
 
 | Endpoint | Notes |
 |---|---|
-| `GET /api/v1/now` | `name, model, up_since, link_ok` (last good poll within 10 s), `frames[2]` (latency/drops/error), `fields[] {id,label,group,text,number}`, `history[] {age_s,pct,state}` (360 points). |
+| `GET /api/v1/now` | `name, model, up_since, link_ok` (last good poll within 10 s), `frames[2]` (latency/drops/error), `fields[] {id,label,group,text,number}`, `history[] {age_s,pct,state}` (360 points). Feed (v1.7+): `feed_ok` (bool, null for ~6 s after start), `last_outage_start`, `last_outage_end` (null while ongoing), `last_outage_seconds`, `last_outage_end_approx` (ISO 8601 with offset; all null if no outage seen). |
 | `GET /api/v1/identity` | `{name, model, http_port}`. |
 | `GET /api/v1/settings` | `{api_version, model, writes_enabled, settings[], diagnostics}`. Each setting has `key,label,description,unit,field_id,menu,type,options[{value,label}],current,enabled,note`. |
 | `POST /api/v1/set` | Body `{"key": str, "value": number, "dry_run"?: bool}`, `Content-Type: application/json` required, body ≤ 1024 bytes. Status codes are listed in SETTINGS.md. |
 | UDP 28776 | Send bytes starting with `powhvm6-discover`. The reply is `{name, model, http_port, api_version}`. |
 | `GET /` | Endpoint list. |
+
+**Feed tracker** (`FeedTracker`): on each good block-0 read, grid is "up" when AC input ≥ `FEED_MIN_V` (80 V) and frequency ≥ `FEED_MIN_HZ` (40 Hz). A state change needs `FEED_DEBOUNCE` (3) consecutive polls (~6 s); the outage start/end is the first poll of the new state. Failed reads never count, so an RS-232 link drop is not an outage. The last outage is persisted atomically to `~pi/powhvm6-feed.json`. After a restart during an outage, the stored start is kept; if the grid is already back when the script first sees it, the end is the first poll after restart and `last_outage_end_approx` is true. The app's Feed tile (Status card) shows green OK, red "Down since…" while down, red "Last out … · duration" for 24 h after, then green with a "Last out…" subtext; no tile if the fields are missing (older script).
 
 `API_VERSION = 2`. If you change the API shape in a breaking way, bump it and keep the app tolerant: the app uses `opt*` getters and treats a 404 on `/settings` as an old Pi script.
 

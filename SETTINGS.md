@@ -114,6 +114,8 @@ Each setting has `key, label, description, unit, field_id, menu, type, options[{
 
 Every write the poll thread runs (success or failure) is appended to `~pi/powhvm6-writes.log` as one JSON line. Requests rejected before queuing (4xx) and 504 timeouts are not logged.
 
+`GET /api/v1/now` also carries read-only grid feed state (v1.7+): `feed_ok`, `last_outage_start`, `last_outage_end`, `last_outage_seconds`, `last_outage_end_approx`. These come from AC input voltage/frequency readings, not a setting; see CONTRIBUTING.md (Feed tracker).
+
 ## Safety
 
 * Only registry keys can be written: no raw register or command passthrough.
