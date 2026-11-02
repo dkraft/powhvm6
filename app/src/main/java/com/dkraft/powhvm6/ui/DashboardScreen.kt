@@ -40,6 +40,7 @@ import com.dkraft.powhvm6.Field
 import com.dkraft.powhvm6.HistoryPoint
 import com.dkraft.powhvm6.MainViewModel
 import com.dkraft.powhvm6.Snapshot
+import com.dkraft.powhvm6.displayText
 
 @Composable
 fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
