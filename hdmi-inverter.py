@@ -519,6 +519,26 @@ SETTINGS = [
         "enabled": True,
         "note": "Only applies on utility/standby; on battery only solar charges.",
     },
+    {
+        # Program 03. 5019, mirrored in 4538 (block 0, index 37). Raw values
+        # from odya docs/registers-map.md ("0 - 90-280VAC, 1 - 170-280VAC") and
+        # src/modules/inverter.yaml (0 Appliances, 1 UPS); the 6.2 kW manual lists
+        # APL (default) then UPS. 0 = Appliances matches this unit's live reading;
+        # 1 = UPS is from those sources only, not yet seen on this unit.
+        "key": "ac_input_range",
+        "label": "AC range",
+        "description": "AC input voltage range accepted from the grid",
+        "unit": "",
+        "field_id": "ac_range",
+        "menu": 3,
+        "write": {"function": 6, "register": 5019, "scale": 1},
+        "read": {"block": 0, "index": 37, "scale": 1},
+        "validation": {"type": "enum", "options": {
+            0: "Appliances (90-280 V, wide)",
+            1: "UPS (170-280 V, narrow, faster transfer)"}},
+        "enabled": True,
+        "note": "UPS drops the grid below about 170 V. On a 120 V grid that likely means the inverter won't accept utility at all.",
+    },
 ]
 SETTINGS_BY_KEY = {s["key"]: s for s in SETTINGS}
 

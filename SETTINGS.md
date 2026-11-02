@@ -18,10 +18,12 @@ Enabled today:
 | `back_to_battery_voltage` | To battery | 13 / 5026 | 48–58 V, 1 V | ≥ To grid + 1 V |
 | `output_source_priority` | Output mode | 01 / 5018 | enum 0 Utility first, 1 Solar first, 2 SBU | – |
 | `charger_source_priority` | Charge mode | 16 / 5017 | enum 1 Solar first, 2 Solar + utility, 3 Only solar | – |
+| `ac_input_range` | AC range | 03 / 5019 | enum 0 Appliances (90–280 V), 1 UPS (170–280 V) | – |
 
 * Bulk/Float need program 05 = User-defined (reg 5020 = 2). The API rejects Float above Bulk, so to lower both, write Float first; to raise both, write Bulk first.
 * Program 13's LCD option "FUL" (battery fully charged) is **not** offered: its raw register value isn't documented.
 * **Enum raw values.** Confirmed on this unit by reading: 5018 = 0 shows Utility first and 5017 = 1 shows Solar first, and same-value writes of both were acked and read back. The other values (5018: 1 Solar first, 2 SBU; 5017: 2 Solar + utility, 3 Only solar) come from the odya ESPHome PowMr config, which was tested on the HVM2.4H/10.2M, not on this unit. The option order matches the 6.2M manual. Verify on the LCD after the first real change.
+* **AC range (5019).** 0 = Appliances is confirmed on this unit by reading (4538 = 0, matching the Appliance mode David has set). 1 = UPS comes from two odya sources (`docs/registers-map.md`: "0 - 90-280VAC, 1 - 170-280VAC"; `inverter.yaml`: 0 Appliances, 1 UPS). The order matches the 6.2M manual (APL default, then UPS). High confidence, but not yet seen on this unit. This inverter is a 220 V model on a 120 V grid, so UPS (≥ 170 V) would most likely stop it accepting utility at all.
 * Left out on purpose: output mode **MKS** (in the 6.2M manual, raw value unknown) and charger **0 = Utility first** (not an option in the 6.2M manual).
 
 ## Protocol facts (POW-HVM6.2M-48V-N, Modbus RTU)
@@ -38,6 +40,7 @@ Enabled today:
 |---|---|---|
 | 5017 | Charger source priority (16) | 4536 |
 | 5018 | Output source priority (01) | 4537 |
+| 5019 | AC input voltage range (03): 0 Appliances, 1 UPS | 4538 |
 | 5020 | Battery type (05): 0 AGM, 1 Flooded, 2 User-defined, 3 LIB, 4 LIB-485 | – |
 | 5022 | Max total charge current (02) | 4541 |
 | 5024 | Max utility charge current (11) | 4543 |
