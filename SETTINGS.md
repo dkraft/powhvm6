@@ -46,7 +46,8 @@ Bulk/Float: 48.0–60.0 V in 0.1 V steps (needs program 05 = User-defined, reg 5
     "read": {"block": 0, "index": 40, "scale": 1},   # where the current value is read back
     "validation": {"type": "range", "min": 10, "max": 120, "step": 10},
     #   or {"type": "options", "values": [2, 10, 20]}
-    #   or {"type": "enum", "values": {0: "Utility first", 1: "Solar first"}}
+    #   or {"type": "enum", "options": {0: "Utility first", 1: "Solar first"}}
+    #   optional in validation: "min_of": "<key>" / "max_of": "<key>" (cross-setting limits)
     "enabled": True,                      # False = listed but read-only
     "note": "...",                        # optional warning shown on the confirm screen
 }
@@ -73,7 +74,7 @@ Bulk/Float: 48.0–60.0 V in 0.1 V steps (needs program 05 = User-defined, reg 5
 
 `GET /api/v1/settings` returns `{api_version, model, writes_enabled, settings: [...], diagnostics}`.
 Each setting has `key, label, description, unit, field_id, menu, type, options[{value,label}], current, enabled, note`.
-`diagnostics` holds a one-time read-only snapshot of 5017–5033 and some raw status words.
+`diagnostics` holds a read-only snapshot of 5017–5033, taken once at script start (not refreshed after writes), and some raw status words.
 
 `POST /api/v1/set`, body `{"key": str, "value": number, "dry_run"?: bool}`. Content-Type must be `application/json`.
 
@@ -83,12 +84,12 @@ Each setting has `key, label, description, unit, field_id, menu, type, options[{
 | 400 / 415 | Bad JSON or body size (max 1024 bytes) / wrong content type |
 | 403 | Setting disabled in the registry |
 | 404 | Unknown key |
-| 422 | Value not allowed (response includes `options`) |
+| 422 | Value not allowed, or breaks a `min_of`/`max_of` limit such as float ≤ bulk (response includes `options`) |
 | 502 | Inverter NAK, no reply, or readback mismatch (`ok: false`, `message`) |
 | 503 | Another write is in progress or the queue is full |
 | 504 | Timed out waiting for the poll thread (job cancelled) |
 
-Every write attempt is appended to `~pi/powhvm6-writes.log` as one JSON line.
+Every write the poll thread runs (success or failure) is appended to `~pi/powhvm6-writes.log` as one JSON line. Requests rejected before queuing (4xx) and 504 timeouts are not logged.
 
 ## Safety
 

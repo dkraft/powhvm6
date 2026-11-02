@@ -2,7 +2,9 @@
 
 HDMI console and Android dashboard for a PowMr POW-HVM6.2M-48V-N. A Python script on the Raspberry Pi polls the inverter over RS-232 Modbus RTU, draws the readings on the local tty, and serves a LAN JSON API for the phone app.
 
-Every 2 seconds it sends the same two read-only holding-register requests the official Wi-Fi dongle sends: 45 registers at 4501, then 16 registers at 4546. The link is 2400 baud, 8N1, slave 5. Register words are little-endian. No settings are written.
+Every 2 seconds it sends the same two read-only holding-register requests the official Wi-Fi dongle sends: 45 registers at 4501, then 16 registers at 4546. The link is 2400 baud, 8N1, slave 5. Register words are little-endian. The only writes are the validated settings in the registry (see [SETTINGS.md](SETTINGS.md)).
+
+Developers and coding agents: start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## HDMI console
 
