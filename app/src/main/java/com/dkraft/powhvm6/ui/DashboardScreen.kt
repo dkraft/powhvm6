@@ -150,8 +150,10 @@ fun GroupCard(
             val rows = (fields.size + 1) / 2
             for (r in 0 until rows) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Column-major: left column is fields[0 until rows], right is the rest.
+                    // (Using size / 2 here duplicated the middle field for odd counts.)
                     val left = fields.getOrNull(r)
-                    val right = fields.getOrNull(r + fields.size / 2)
+                    val right = fields.getOrNull(r + rows)
                     FieldCell(left, modifier = Modifier.weight(1f), editable = left?.id in editable, onEdit = onEdit)
                     if (right != null) FieldCell(right, modifier = Modifier.weight(1f), editable = right.id in editable, onEdit = onEdit)
                     else Spacer(Modifier.weight(1f))
