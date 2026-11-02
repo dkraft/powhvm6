@@ -8,7 +8,7 @@ data class Field(
     val group: String,
     val text: String,
     val number: Double?,
-    /** 0 neutral, 1 good (green), 2 alert (red), 3 warning (amber). Only set by the app (Feed tile). */
+    /** 0 neutral, 1 good (green), 2 alert (red), 3 warning (amber). Only set by the app (AC Feed tile). */
     val tone: Int = 0,
     /** Optional smaller line under the value. */
     val sub: String? = null
@@ -273,7 +273,7 @@ object SettingsApi {
 }
 
 
-/** How long a past outage keeps the Feed tile red. */
+/** How long a past outage keeps the AC Feed tile red. */
 const val FEED_ALERT_MS = 24L * 3600 * 1000
 
 private fun fmtWhen(ms: Long, nowMs: Long): String {
@@ -291,27 +291,27 @@ fun fmtDuration(seconds: Long): String = when {
     else -> { val h = seconds / 3600; val m = (seconds % 3600) / 60; if (m == 0L) "$h h" else "$h h $m min" }
 }
 
-/** The dashboard "Feed" tile (Status group), or null if the Pi doesn't report feed state. */
+/** The dashboard "AC Feed" tile (Status group), or null if the Pi doesn't report feed state. */
 fun feedField(feed: FeedInfo?, nowMs: Long = System.currentTimeMillis()): Field? {
     feed ?: return null
     val start = feed.outageStartMs
     val end = feed.outageEndMs
     val blip = feed.lastBlipMs
     return when {
-        feed.ok == false -> Field("feed", "Feed", "status",
+        feed.ok == false -> Field("feed", "AC Feed", "status",
             if (start != null) "Down since ${fmtWhen(start, nowMs)}" else "Down",
             null, tone = 2,
             sub = if (start != null) "for ${fmtDuration((nowMs - start) / 1000)}" else null)
-        feed.ok == null -> Field("feed", "Feed", "status", "—", null,
+        feed.ok == null -> Field("feed", "AC Feed", "status", "—", null,
             sub = if (start != null) "Last out ${fmtWhen(start, nowMs)}" else null)
-        start != null && end != null && nowMs - end < FEED_ALERT_MS -> Field("feed", "Feed", "status",
+        start != null && end != null && nowMs - end < FEED_ALERT_MS -> Field("feed", "AC Feed", "status",
             "Last out ${fmtWhen(start, nowMs)} · ${if (feed.endApprox) "~" else ""}${fmtDuration(feed.outageSeconds ?: ((end - start) / 1000))}",
             null, tone = 2)
-        blip != null && nowMs - blip < FEED_ALERT_MS -> Field("feed", "Feed", "status",
+        blip != null && nowMs - blip < FEED_ALERT_MS -> Field("feed", "AC Feed", "status",
             "Blip ${fmtWhen(blip, nowMs)}" + (if (feed.blips24h > 1) " · ${feed.blips24h} in 24 h" else ""),
             null, tone = 3,
             sub = feed.lastBlipMinV?.let { String.format(java.util.Locale.US, "min %.0f V", it) })
-        else -> Field("feed", "Feed", "status", "OK", null, tone = 1,
+        else -> Field("feed", "AC Feed", "status", "OK", null, tone = 1,
             sub = when {
                 start != null -> "Last out ${fmtWhen(start, nowMs)}"
                 blip != null -> "Last blip ${fmtWhen(blip, nowMs)}"

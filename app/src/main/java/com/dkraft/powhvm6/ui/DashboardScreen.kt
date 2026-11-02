@@ -80,7 +80,7 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val groups = linkedMapOf<String, MutableList<Field>>()
     val unit = vm.tempUnit
     for (f in visible) groups.getOrPut(f.group) { mutableListOf() }.add(f.copy(text = f.displayText(unit)))
-    // Feed tile goes first in Status. The Pi script may predate it (feed == null): no tile.
+    // AC Feed tile goes first in Status. The Pi script may predate it (feed == null): no tile.
     feedField(snap.feed)?.let { feed ->
         if (vm.isFieldVisible(feed.id)) groups.getOrPut(feed.group) { mutableListOf() }.add(0, feed)
     }

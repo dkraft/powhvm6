@@ -69,7 +69,7 @@ Android app ── HTTP GET /api/v1/now every 2 s, /settings on demand, POST /se
 
 **Link stats** (`LinkStats`): one frame = one Modbus RTU block read (two per cycle: 4501×45, 4546×16). Dropped = timeout, bad CRC, short/garbled reply, a block skipped because the port died, or a serial exception. The app adds its own App→Pi round-trip (last, average of last 30) and failed fetches, since it last (re)connected; both show in the bottom "Link" card (toggle ids `diag_app`, `diag_pi`).
 
-The app's Feed tile (Status card) shows green OK, red "Down since…" while down, red "Last out … · duration" for 24 h after; otherwise amber "Blip <time>" (with "N in 24 h" if more than one, min voltage below) for 24 h after a blip; then green with a "Last out…" (or "Last blip…") subtext; no tile if the fields are missing (older script).
+The app's AC Feed tile (toggle id `feed`) (Status card) shows green OK, red "Down since…" while down, red "Last out … · duration" for 24 h after; otherwise amber "Blip <time>" (with "N in 24 h" if more than one, min voltage below) for 24 h after a blip; then green with a "Last out…" (or "Last blip…") subtext; no tile if the fields are missing (older script).
 
 `API_VERSION = 2`. If you change the API shape in a breaking way, bump it and keep the app tolerant: the app uses `opt*` getters and treats a 404 on `/settings` as an old Pi script.
 
