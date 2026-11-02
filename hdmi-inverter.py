@@ -694,12 +694,9 @@ def run_write_job(ser, job: WriteJob) -> dict:
     if ack.get("ack"):
         api_state["probe_due"] = 0  # refresh the 50xx diagnostics snapshot next loop
     if res["ok"]:
-        shown = None
-        if s["validation"].get("type") == "enum":
-            shown = s["validation"].get("options", {}).get(int(readback))
-        if shown is None:
-            shown = f"{readback} {s.get('unit', '')}".strip()
-        res["message"] = f"{s['label']} is now {shown}"
+        shown = s["validation"].get("options", {}).get(int(readback)) if s["validation"]["type"] == "enum" else None
+        res["message"] = (f"{s['label']} is now {shown}" if shown else
+                          f"{s['label']} is now {readback} {s.get('unit', '')}".strip())
     elif ack.get("ack"):
         res["message"] = f"Inverter acknowledged, but reads back {readback}" + (f" ({read_err})" if read_err else "")
     else:
