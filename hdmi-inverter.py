@@ -442,6 +442,83 @@ SETTINGS = [
         "enabled": True,
         "note": "Must not exceed the bulk (CV) voltage. Lower it first before lowering bulk.",
     },
+    {
+        # Program 12 (SBU / Solar first): battery voltage at which loads go
+        # back to utility. 5025 holds volts x10, big-endian; mirrored in 4544
+        # (block 0, index 43). 6.2 kW options: 42-51 V in 1 V steps.
+        "key": "back_to_grid_voltage",
+        "label": "To grid",
+        "description": "Battery voltage where loads switch back to utility (SBU / Solar first)",
+        "unit": "V",
+        "field_id": "to_grid",
+        "menu": 12,
+        "write": {"function": 6, "register": 5025, "scale": 10},
+        "read": {"block": 0, "index": 43, "scale": 10},
+        "validation": {"type": "range", "min": 42, "max": 51, "step": 1,
+                       "min_of": {"read": {"block": 1, "index": 2, "scale": 10},
+                                  "label": "Low cutoff", "unit": "V", "margin": 1},
+                       "max_of": {"key": "back_to_battery_voltage", "margin": 1}},
+        "enabled": True,
+        "note": "Must be at least 1 V above Low cutoff and 1 V below To battery.",
+    },
+    {
+        # Program 13: battery voltage at which loads return to battery.
+        # 5026 holds volts x10, big-endian; mirrored in 4545 (block 0, index 44).
+        # 6.2 kW options: 48-58 V in 1 V steps. The LCD "FUL" (battery fully
+        # charged) option is left out: its raw register value isn't documented.
+        "key": "back_to_battery_voltage",
+        "label": "To battery",
+        "description": "Battery voltage where loads switch back to battery (SBU / Solar first)",
+        "unit": "V",
+        "field_id": "to_battery",
+        "menu": 13,
+        "write": {"function": 6, "register": 5026, "scale": 10},
+        "read": {"block": 0, "index": 44, "scale": 10},
+        "validation": {"type": "range", "min": 48, "max": 58, "step": 1,
+                       "min_of": {"key": "back_to_grid_voltage", "margin": 1}},
+        "enabled": True,
+        "note": "Must be at least 1 V above To grid. Keep it at or below what charging actually reaches (float).",
+    },
+    {
+        # Program 01. 5018, mirrored in 4537 (block 0, index 36). Raw values
+        # from the odya ESPHome PowMr config (tested on HVM2.4H/10.2M);
+        # 0 = Utility first matches this unit's live reading. MKS (in the
+        # 6.2 kW manual) is left out: its raw value isn't documented.
+        "key": "output_source_priority",
+        "label": "Output mode",
+        "description": "Output source priority: which source powers the loads first",
+        "unit": "",
+        "field_id": "output_mode",
+        "menu": 1,
+        "write": {"function": 6, "register": 5018, "scale": 1},
+        "read": {"block": 0, "index": 36, "scale": 1},
+        "validation": {"type": "enum", "options": {
+            0: "Utility first (USB)",
+            1: "Solar first (SUB)",
+            2: "SBU priority (solar, battery, then utility)"}},
+        "enabled": True,
+        "note": "Changes where the house load comes from. SBU drains the battery to To grid before using utility.",
+    },
+    {
+        # Program 16. 5017, mirrored in 4536 (block 0, index 35). Raw values
+        # from the odya ESPHome PowMr config; 1 = Solar first matches this
+        # unit's live reading. 0 (Utility first) is left out: the 6.2 kW
+        # manual has no such charger option.
+        "key": "charger_source_priority",
+        "label": "Charge mode",
+        "description": "Charger source priority: what may charge the battery",
+        "unit": "",
+        "field_id": "charge_mode",
+        "menu": 16,
+        "write": {"function": 6, "register": 5017, "scale": 1},
+        "read": {"block": 0, "index": 35, "scale": 1},
+        "validation": {"type": "enum", "options": {
+            1: "Solar first (utility only when no solar)",
+            2: "Solar + utility",
+            3: "Only solar (never charge from utility)"}},
+        "enabled": True,
+        "note": "Only applies on utility/standby; on battery only solar charges.",
+    },
 ]
 SETTINGS_BY_KEY = {s["key"]: s for s in SETTINGS}
 
@@ -492,22 +569,36 @@ def validate_value(setting, value):
     return match, raw
 
 
+def _relation_ref(spec):
+    """A relation target: "<key>" or {"key": k, "margin": m} or
+    {"read": {...}, "label": l, "unit": u, "margin": m}. Returns (label, unit, current, margin)."""
+    if isinstance(spec, str):
+        spec = {"key": spec}
+    margin = float(spec.get("margin", 0))
+    if "key" in spec:
+        other = SETTINGS_BY_KEY[spec["key"]]
+        return other["label"], other.get("unit", ""), setting_current(other), margin
+    return spec.get("label", "?"), spec.get("unit", ""), setting_current({"read": spec["read"]}), margin
+
+
 def check_relations(setting, value) -> None:
     """Cross-setting limits (e.g. float <= bulk), against current readings."""
     v = setting["validation"]
-    for rel, cmp_ok, word in (("min_of", lambda a, b: a >= b - 1e-6, "below"),
-                              ("max_of", lambda a, b: a <= b + 1e-6, "above")):
-        other_key = v.get(rel)
-        if not other_key:
+    for rel in ("min_of", "max_of"):
+        spec = v.get(rel)
+        if not spec:
             continue
-        other = SETTINGS_BY_KEY[other_key]
-        cur = setting_current(other)
+        label, unit, cur, margin = _relation_ref(spec)
         if cur is None:
-            raise ValueError(f"{other['label']} hasn't been read yet; try again")
-        if not cmp_ok(value, cur):
-            unit = other.get("unit", "")
-            raise ValueError(f"{setting['label']} can't be {word} {other['label']} "
-                             f"({cur:g} {unit})")
+            raise ValueError(f"{label} hasn't been read yet; try again")
+        if rel == "min_of":
+            ok, limit, word = value >= cur + margin - 1e-6, cur + margin, "below"
+        else:
+            ok, limit, word = value <= cur - margin + 1e-6, cur - margin, "above"
+        if not ok:
+            extra = f" {'+' if rel == 'min_of' else '-'} {margin:g}" if margin else ""
+            raise ValueError(f"{setting['label']} can't be {word} {limit:g} {unit} "
+                             f"({label} {cur:g} {unit}{extra})".replace("  ", " "))
 
 
 def settings_payload() -> dict:
@@ -532,6 +623,7 @@ def settings_payload() -> dict:
             )
         diag = api_state.get("probe_50xx")
         block5017 = api_state.get("probe_5017_block")
+        probe_time = api_state.get("probe_time")
     b0, b1 = last_blocks.get(0), last_blocks.get(1)
     status_raw = {}
     if b0 and len(b0) >= 45:
@@ -542,6 +634,7 @@ def settings_payload() -> dict:
             "settings": out,
             "diagnostics": {"settings_registers_raw": diag,
                             "settings_block_5017": block5017,
+                            "settings_probe_time": probe_time,
                             "status_raw": status_raw}}
 
 
@@ -598,6 +691,8 @@ def run_write_job(ser, job: WriteJob) -> dict:
             time.sleep(0.7)
     res["readback"] = readback
     res["ok"] = bool(ack.get("ack")) and readback is not None and abs(readback - job.value) < 1e-6
+    if ack.get("ack"):
+        api_state["probe_due"] = 0  # refresh the 50xx diagnostics snapshot next loop
     if res["ok"]:
         res["message"] = f"{s['label']} is now {readback} {s.get('unit', '')}".strip()
     elif ack.get("ack"):
@@ -618,11 +713,17 @@ def log_write(key, result) -> None:
         pass
 
 
+PROBE_INTERVAL_S = 600
+
+
 def probe_settings_regs(ser) -> None:
-    """One read-only look at the 50xx settings registers, for diagnostics."""
-    if api_state.get("probe_done"):
+    """Read-only look at the 50xx settings registers, for diagnostics.
+
+    Runs at startup, every PROBE_INTERVAL_S, and right after a successful
+    write (run_write_job clears probe_due)."""
+    if time.monotonic() < api_state.get("probe_due", 0):
         return
-    api_state["probe_done"] = True
+    api_state["probe_due"] = time.monotonic() + PROBE_INTERVAL_S
     out = {}
     for s in SETTINGS:
         reg = s["write"]["register"]
@@ -644,6 +745,7 @@ def probe_settings_regs(ser) -> None:
     with api_lock:
         api_state["probe_50xx"] = out
         api_state["probe_5017_block"] = block
+        api_state["probe_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def process_write_jobs(ser) -> None:

@@ -121,6 +121,16 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Temperature unit", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(12.dp))
+                    TempUnitSelector(vm)
+                }
+            }
+        }
+
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
                     Text("Displayed fields", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(4.dp))
                     Text(
@@ -147,6 +157,21 @@ fun ThemeModeSelector(vm: MainViewModel) {
                 onClick = { vm.updateThemeMode(mode) },
                 shape = SegmentedButtonDefaults.itemShape(index = i, count = modes.size)
             ) { Text(mode.label) }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TempUnitSelector(vm: MainViewModel) {
+    val units = com.dkraft.powhvm6.TempUnit.values()
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        units.forEachIndexed { i, u ->
+            SegmentedButton(
+                selected = vm.tempUnit == u,
+                onClick = { vm.updateTempUnit(u) },
+                shape = SegmentedButtonDefaults.itemShape(index = i, count = units.size)
+            ) { Text(u.label) }
         }
     }
 }

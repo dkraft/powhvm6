@@ -75,7 +75,8 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
 
     val visible = snap.fields.filter { vm.isFieldVisible(it.id) }
     val groups = linkedMapOf<String, MutableList<Field>>()
-    for (f in visible) groups.getOrPut(f.group) { mutableListOf() }.add(f)
+    val unit = vm.tempUnit
+    for (f in visible) groups.getOrPut(f.group) { mutableListOf() }.add(f.copy(text = f.displayText(unit)))
 
     val editable = vm.editableFieldIds()
 

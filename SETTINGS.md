@@ -6,8 +6,23 @@ To expose another setting, add an entry to `SETTINGS` in `hdmi-inverter.py`, dep
 the script, and it shows up in the app (Settings → Inverter settings, and as a
 tappable tile on the dashboard if `field_id` matches a dashboard field).
 
-Enabled today: **Max charge** (LCD program 02), **AC max charge** (program 11), **Bulk (CV)** (program 26, reg 5027) and **Float** (program 27, reg 5028).
-Bulk/Float: 48.0–60.0 V in 0.1 V steps (needs program 05 = User-defined, reg 5020 = 2). The API rejects Float above Bulk, so to lower both, write Float first; to raise both, write Bulk first.
+Enabled today:
+
+| Key | Label | Program / reg | Allowed values | Cross-limits |
+|---|---|---|---|---|
+| `max_charge_current` | Max charge | 02 / 5022 | 10–120 A, 10 A steps | – |
+| `max_ac_charge_current` | AC chg max | 11 / 5024 | 2, 10, 20 … 100 A | – |
+| `bulk_charge_voltage` | Bulk (CV) | 26 / 5027 | 48.0–60.0 V, 0.1 V | ≥ Float |
+| `float_charge_voltage` | Float | 27 / 5028 | 48.0–60.0 V, 0.1 V | ≤ Bulk |
+| `back_to_grid_voltage` | To grid | 12 / 5025 | 42–51 V, 1 V | ≥ Low cutoff (5029) + 1 V, ≤ To battery − 1 V |
+| `back_to_battery_voltage` | To battery | 13 / 5026 | 48–58 V, 1 V | ≥ To grid + 1 V |
+| `output_source_priority` | Output mode | 01 / 5018 | enum 0 Utility first, 1 Solar first, 2 SBU | – |
+| `charger_source_priority` | Charge mode | 16 / 5017 | enum 1 Solar first, 2 Solar + utility, 3 Only solar | – |
+
+* Bulk/Float need program 05 = User-defined (reg 5020 = 2). The API rejects Float above Bulk, so to lower both, write Float first; to raise both, write Bulk first.
+* Program 13's LCD option "FUL" (battery fully charged) is **not** offered: its raw register value isn't documented.
+* **Enum raw values.** Confirmed on this unit by reading: 5018 = 0 shows Utility first and 5017 = 1 shows Solar first, and same-value writes of both were acked and read back. The other values (5018: 1 Solar first, 2 SBU; 5017: 2 Solar + utility, 3 Only solar) come from the odya ESPHome PowMr config, which was tested on the HVM2.4H/10.2M, not on this unit. The option order matches the 6.2M manual. Verify on the LCD after the first real change.
+* Left out on purpose: output mode **MKS** (in the 6.2M manual, raw value unknown) and charger **0 = Utility first** (not an option in the 6.2M manual).
 
 ## Protocol facts (POW-HVM6.2M-48V-N, Modbus RTU)
 
@@ -47,7 +62,12 @@ Bulk/Float: 48.0–60.0 V in 0.1 V steps (needs program 05 = User-defined, reg 5
     "validation": {"type": "range", "min": 10, "max": 120, "step": 10},
     #   or {"type": "options", "values": [2, 10, 20]}
     #   or {"type": "enum", "options": {0: "Utility first", 1: "Solar first"}}
-    #   optional in validation: "min_of": "<key>" / "max_of": "<key>" (cross-setting limits)
+    #   optional in validation (cross-setting limits), each one of:
+    #     "min_of": "<key>"                              value >= other
+    #     "min_of": {"key": "<key>", "margin": 1}        value >= other + 1
+    #     "min_of": {"read": {"block": 1, "index": 2, "scale": 10},
+    #                "label": "Low cutoff", "unit": "V", "margin": 1}   # a non-registry reading
+    #     "max_of": ... same forms, value <= other - margin
     "enabled": True,                      # False = listed but read-only
     "note": "...",                        # optional warning shown on the confirm screen
 }
@@ -74,7 +94,7 @@ Bulk/Float: 48.0–60.0 V in 0.1 V steps (needs program 05 = User-defined, reg 5
 
 `GET /api/v1/settings` returns `{api_version, model, writes_enabled, settings: [...], diagnostics}`.
 Each setting has `key, label, description, unit, field_id, menu, type, options[{value,label}], current, enabled, note`.
-`diagnostics` holds a read-only snapshot of 5017–5033, taken once at script start (not refreshed after writes), and some raw status words.
+`diagnostics` holds a read-only snapshot of 5017–5033 (`settings_block_5017`, big-endian decoded) with its time (`settings_probe_time`, Pi local time), plus some raw status words. The snapshot is taken at startup, every 10 minutes (`PROBE_INTERVAL_S`), and on the next poll loop after any acknowledged write.
 
 `POST /api/v1/set`, body `{"key": str, "value": number, "dry_run"?: bool}`. Content-Type must be `application/json`.
 

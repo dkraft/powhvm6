@@ -5,6 +5,9 @@ import android.content.SharedPreferences
 
 enum class ThemeMode(val label: String) { SYSTEM("System"), DARK("Dark"), LIGHT("Light") }
 
+/** Display unit for temperatures. The Pi API always reports °C; the app converts. */
+enum class TempUnit(val label: String) { FAHRENHEIT("°F"), CELSIUS("°C") }
+
 class Settings(private val ctx: Context) {
     private val prefs: SharedPreferences =
         ctx.getSharedPreferences("powhvm6", Context.MODE_PRIVATE)
@@ -24,6 +27,11 @@ class Settings(private val ctx: Context) {
             return migrated
         }
         set(v) = prefs.edit().putString("theme", v.name).apply()
+
+    /** °F (default) or °C. */
+    var tempUnit: TempUnit
+        get() = TempUnit.values().firstOrNull { it.name == prefs.getString("temp_unit", null) } ?: TempUnit.FAHRENHEIT
+        set(v) = prefs.edit().putString("temp_unit", v.name).apply()
 
     /** Returns the set of hidden field ids. Empty means show all. */
     fun hiddenFields(): Set<String> {

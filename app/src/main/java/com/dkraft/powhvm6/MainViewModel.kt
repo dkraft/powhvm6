@@ -36,6 +36,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         themeMode = mode
     }
 
+    var tempUnit by mutableStateOf(settings.tempUnit)
+        private set
+
+    fun updateTempUnit(unit: TempUnit) {
+        settings.tempUnit = unit
+        tempUnit = unit
+    }
+
     /** Observable so field toggles update immediately. */
     var hiddenFields by mutableStateOf(settings.hiddenFields())
         private set

@@ -80,6 +80,20 @@ object Api {
     }
 }
 
+private val CELSIUS_TEXT = Regex("""^\s*(-?\d+(?:\.\d+)?)\s*°?\s*C\s*$""")
+
+/** Field text for display: temperatures the Pi reports in °C ("35 C") are shown in the chosen unit. */
+fun Field.displayText(unit: TempUnit): String {
+    val m = CELSIUS_TEXT.matchEntire(text) ?: return text
+    val c = m.groupValues[1].toDouble()
+    return when (unit) {
+        TempUnit.CELSIUS -> "${fmtTemp(c)} °C"
+        TempUnit.FAHRENHEIT -> "${fmtTemp(c * 9.0 / 5.0 + 32.0)} °F"
+    }
+}
+
+private fun fmtTemp(v: Double): String = kotlin.math.round(v).toLong().toString()
+
 /** One writable inverter setting, as described by the Pi's GET /api/v1/settings. */
 data class SettingOption(val value: Double, val label: String)
 

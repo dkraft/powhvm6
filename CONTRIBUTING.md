@@ -33,10 +33,10 @@ App sources:
 | `ApiModels.kt` | JSON parsing and HTTP for `/now`, `/identity`, `/settings`, `/set` (`org.json` + `HttpURLConnection`, no third-party network libraries). |
 | `Discover.kt` | UDP broadcast discovery, then a parallel /24 scan as fallback. |
 | `HostAddr.kt` | Normalizes user input to `host:port` (default port 8088). |
-| `Settings.kt` | SharedPreferences: host, theme mode, hidden fields. |
+| `Settings.kt` | SharedPreferences: host, theme mode, temperature unit (°F default / °C; the Pi API stays °C and `Field.displayText` in `ApiModels.kt` converts), hidden fields. |
 | `Theme.kt` | Material 3 theme (System/Dark/Light). |
 | `ui/DashboardScreen.kt` | Grouped field cards and load graph. A tile is tappable when its field id matches an enabled registry setting's `field_id`. |
-| `ui/SettingsScreen.kt` | Field visibility, theme, host entry, and the "Inverter settings" list from the registry. |
+| `ui/SettingsScreen.kt` | Field visibility, theme, temperature unit, host entry, and the "Inverter settings" list from the registry. |
 | `ui/SettingEditor.kt` | Edit dialog: pick from the Pi-supplied options, confirm, write, show the readback. |
 | `ui/SearchScreen.kt` | LAN search results. |
 
@@ -52,7 +52,7 @@ Android app ── HTTP GET /api/v1/now every 2 s, /settings on demand, POST /se
 
 * **One process owns the serial port.** The Pi can't share a serial line between processes, so the API, discovery and writes all live in the same script. HTTP handler threads never touch the port. A `POST /set` becomes a `WriteJob` on `write_jobs`, the handler sets `wake`, and the **main poll loop** runs the job (`process_write_jobs`) between polls. `write_lock` allows one write request at a time.
 * **Polling:** each cycle reads `BLOCK1 = (4501, 45)` and then `BLOCK2 = (4546, 16)` with function 03, the same requests the official Wi-Fi dongle sends. Results land in `last_blocks[0]` / `last_blocks[1]` and are formatted into `FIELDS` (`COLUMNS` defines them). A field's id is its label lower-cased with spaces turned into `_`, e.g. "AC chg max" → `ac_chg_max`.
-* **Startup probe:** after the first good poll, `probe_settings_regs` reads 5017–5033 one register at a time, **once**, and stores the result for `GET /api/v1/settings` → `diagnostics`. It's a startup snapshot and is **not** refreshed after writes. For a fresh direct read of 50xx, respawn the pane. The live values come from the 45xx mirrors (`current`, `/now`).
+* **50xx probe:** `probe_settings_regs` reads 5017–5033 one register at a time and stores the result for `GET /api/v1/settings` → `diagnostics` (with `settings_probe_time`). It runs after the first good poll, then every `PROBE_INTERVAL_S` (600 s), and again right after any acknowledged write (`run_write_job` clears `probe_due`). The live values come from the 45xx mirrors (`current`, `/now`).
 
 ### API (all JSON, CORS `*` on responses)
 
@@ -96,7 +96,7 @@ The app has **no hard-coded settings**. It builds its editor from `GET /api/v1/s
 Follow the checklist in [SETTINGS.md → Adding a setting](SETTINGS.md#adding-a-setting-checklist). In short:
 
 1. Take allowed values from the manual, never guesses. `validation` is one of `{"type":"options","values":[...]}`, `{"type":"range","min","max","step"}` (expanded with integer stepping, so 0.1 V steps are exact), or `{"type":"enum","options":{raw:"label"}}`.
-2. Add cross-setting limits with `"min_of": "<other key>"` / `"max_of": "<other key>"` inside `validation`. They're checked by `check_relations()` against the latest readings, both in the HTTP handler and again in the poll thread just before writing.
+2. Add cross-setting limits with `"min_of"` / `"max_of"` inside `validation`: a key string, `{"key": k, "margin": m}`, or `{"read": {...}, "label", "unit", "margin"}` for a reading that isn't in the registry (see SETTINGS.md). They're checked by `check_relations()` against the latest readings, both in the HTTP handler and again in the poll thread just before writing.
 3. Ship it with `"enabled": False`, deploy, and check that `current` decodes correctly. Then dry-run (`"dry_run": true`) and check `raw`.
 4. Enable it and do a **same-value write** (write the current value), expecting `ack: true` and a matching `readback`. Only change it for real when the owner has confirmed.
 
@@ -107,7 +107,7 @@ Offline testing: the script imports `serial` at the top, so to exercise validati
 These are hard rules for any change.
 
 1. **Validated writes only.** Only keys in `SETTINGS` can be written. Every value must be in the setting's allowed list (`validate_value`). **Never add a raw register or raw command passthrough**, to the API or anywhere else.
-2. **Cross-setting invariants are enforced in software:** `float ≤ bulk` (`float_charge_voltage.max_of = bulk_charge_voltage`, `bulk.min_of = float`). Max charge should stay ≥ AC max charge (the inverter falls back to Max charge; it's in the note).
+2. **Cross-setting invariants are enforced in software:** `float ≤ bulk` (`float_charge_voltage.max_of = bulk_charge_voltage`, `bulk.min_of = float`); `To grid ≥ Low cutoff + 1 V` and `To grid ≤ To battery − 1 V`; `To battery ≥ To grid + 1 V`. Enum mode switches (output/charger priority) only offer raw values from a documented source; see SETTINGS.md for which are confirmed on this unit. Max charge should stay ≥ AC max charge (the inverter falls back to Max charge; it's in the note).
 3. **Write ordering follows from the invariants.** When **lowering** both bulk and float, write **float first**, then bulk. When **raising** both, write **bulk first**, then float. The API refuses the wrong order with 422.
 4. **The app confirms every write.** The editor's PICK → CONFIRM → Apply flow must stay. "Next" is disabled when the value didn't change, and the dialog can't be dismissed while WRITING. Don't add one-tap writes.
 5. **Read back after every write.** `run_write_job` re-reads the mirror block and reports `ok` only if the readback matches. An inverter exception reply (0x86) is reported and **never retried**. Timed-out jobs are cancelled, never run late.
@@ -179,6 +179,6 @@ $BT/apksigner verify --print-certs powhvm6-<version>.apk
 ## 9. Known quirks
 
 * A multi-register read of 5017×17 returned bad CRCs on this unit, so the probe reads 50xx one register at a time.
-* `diagnostics` in `/settings` is a startup snapshot (see §3).
+* `diagnostics` in `/settings` refreshes every 10 min and after writes (see §3); check `settings_probe_time`.
 * Before the registry loads, `MainViewModel.editableFieldIds()` falls back to `max_charge` and `ac_chg_max`, so those tiles give an "update the Pi" message on old scripts.
 * Program 13 (back to battery, 5026) isn't editable yet. In SBU mode it interacts with float: if float is below it, the pack may never rise back to it.
