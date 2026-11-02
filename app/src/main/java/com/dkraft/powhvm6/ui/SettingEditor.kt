@@ -86,8 +86,16 @@ fun SettingEditorHost(vm: MainViewModel) {
                     }
                 }
                 EditStage.CONFIRM -> if (def != null) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("${def.label}: ${def.labelFor(def.current)} → ${def.labelFor(e.pending)}",
-                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    if (def.type == "enum") {
+                        // Mode switches: spell out the option names on their own lines.
+                        Text(def.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text("From: ${def.labelFor(def.current)}", style = MaterialTheme.typography.bodyMedium)
+                        Text("To: ${def.labelFor(e.pending)}", style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+                    } else {
+                        Text("${def.label}: ${def.labelFor(def.current)} → ${def.labelFor(e.pending)}",
+                            style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    }
                     Text("This writes the new value to the inverter and reads it back.",
                         style = MaterialTheme.typography.bodyMedium)
                     if (def.note.isNotEmpty()) Text(def.note, style = MaterialTheme.typography.bodySmall)
