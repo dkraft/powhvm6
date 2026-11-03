@@ -37,6 +37,9 @@ The same process that owns the serial port also runs an HTTP server and a UDP di
 | `GET http://<ip>:8088/api/v1/identity` | Name, model, HTTP port |
 | `GET http://<ip>:8088/api/v1/settings` | Writable settings registry: definitions, current values, allowed options, read-only diagnostics |
 | `POST http://<ip>:8088/api/v1/set` | Change one registry setting: `{"key": "...", "value": N}` (JSON only). Validated, written, read back. See [SETTINGS.md](SETTINGS.md) |
+| `GET http://<ip>:8088/api/v1/events` | Event trackers: rules, count/kWh since reset, live "running now" state, last event, metric list, form defaults |
+| `GET http://<ip>:8088/api/v1/events/<id>/history?limit=N` | One tracker's recorded events (start, duration, peak, avg, kWh), newest first; kept 90 days |
+| `POST http://<ip>:8088/api/v1/events` | Create a tracker (JSON). `POST .../events/<id>/update\|pause\|resume\|reset\|delete` to change one. Never touches the inverter |
 | UDP port 28776 | Discovery. Send `powhvm6-discover`, get back JSON with the HTTP port |
 
 All endpoints are CORS-enabled (`Access-Control-Allow-Origin: *`) so a browser or web app can read them directly.
@@ -47,8 +50,9 @@ Kotlin + Jetpack Compose, minSdk 26, targetSdk 34. No third-party network librar
 
 | Screen | What it does |
 |---|---|
-| Dashboard | Grouped field cards (live / battery / solar / status / setpoints), a live load-% graph, and a green/red status dot |
+| Dashboard (Live tab) | Grouped field cards (live / battery / solar / status / setpoints), a live load-% graph, and a green/red status dot |
 | Settings | Per-field visibility toggles, night-mode switch, IP address input with Connect, and a "Search LAN" button |
+| Events (tab) | Generic power-event trackers held on the Pi (e.g. Well pump: output > 800 W for 30 s, ends < 600 W held 10 s). Cards show the rule, count, kWh since reset and a live "running now" timer; tap for history, + to add, long-press to edit/pause/reset/delete |
 | Search | UDP broadcast first, then parallel /24 subnet scan; tap "Use" on a found device |
 
 ### Build

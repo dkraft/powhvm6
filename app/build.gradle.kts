@@ -11,8 +11,8 @@ android {
         applicationId = "com.dkraft.powhvm6"
         minSdk = 26
         targetSdk = 34
-        versionCode = 12
-        versionName = "1.11"
+        versionCode = 13
+        versionName = "1.12"
     }
 
     buildTypes {

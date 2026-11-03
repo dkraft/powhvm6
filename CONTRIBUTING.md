@@ -28,9 +28,10 @@ App sources:
 
 | File | Role |
 |---|---|
-| `Main.kt` | Activity and navigation (Dashboard / Settings / Search). |
+| `Main.kt` | Activity and navigation: bottom tabs Live (Dashboard) / Events, plus Settings / Search. |
 | `MainViewModel.kt` | Polls `/api/v1/now` every 2 s, loads the settings registry, runs the edit flow (`EditStage`: LOADING → PICK → CONFIRM → WRITING → DONE/ERROR). |
 | `ApiModels.kt` | JSON parsing and HTTP for `/now`, `/identity`, `/settings`, `/set` (`org.json` + `HttpURLConnection`, no third-party network libraries). |
+| `Events.kt` | Event tracker models, `EventsApi` (HTTP for `/api/v1/events*`), duration/kWh formatting. |
 | `Discover.kt` | UDP broadcast discovery, then a parallel /24 scan as fallback. |
 | `HostAddr.kt` | Normalizes user input to `host:port` (default port 8088). |
 | `Settings.kt` | SharedPreferences: host, theme mode, temperature unit (°F default / °C; the Pi API stays °C and `Field.displayText` in `ApiModels.kt` converts), hidden fields. |
@@ -39,6 +40,7 @@ App sources:
 | `ui/SettingsScreen.kt` | Field visibility, theme, temperature unit, host entry, and the "Inverter settings" list from the registry. |
 | `ui/SettingEditor.kt` | Edit dialog: pick from the Pi-supplied options, confirm, write, show the readback. |
 | `ui/SearchScreen.kt` | LAN search results. |
+| `ui/EventsScreen.kt` | Events tab: tracker cards with live timer, history list, create/edit form, long-press menu (edit, pause/resume, reset and delete with confirmation). |
 
 ## 3. Architecture and data flow
 
@@ -47,7 +49,7 @@ Inverter (slave 5) ⇄ RS-232 2400 8N1 ⇄ FTDI /dev/ttyUSB0 ⇄ hdmi-inverter.p
                                                      ├─ main loop: poll every 2 s, render HDMI, run queued writes
                                                      ├─ HTTP :8088  (ThreadingHTTPServer)
                                                      └─ UDP  :28776 discovery
-Android app ── HTTP GET /api/v1/now every 2 s, /settings on demand, POST /set on confirm
+Android app ── HTTP GET /api/v1/now every 2 s, /settings on demand, POST /set on confirm, /events every 3 s while the Events tab is open
 ```
 
 * **One process owns the serial port.** The Pi can't share a serial line between processes, so the API, discovery and writes all live in the same script. HTTP handler threads never touch the port. A `POST /set` becomes a `WriteJob` on `write_jobs`, the handler sets `wake`, and the **main poll loop** runs the job (`process_write_jobs`) between polls. `write_lock` allows one write request at a time.
@@ -71,7 +73,13 @@ Android app ── HTTP GET /api/v1/now every 2 s, /settings on demand, POST /se
 
 The app's AC Feed tile (toggle id `feed`) (Status card) shows green OK, red "Down since…" while down, red "Last out … · duration" for 24 h after; otherwise amber "Blip <time>" (with "N in 24 h" if more than one, min voltage below) for 24 h after a blip; then green with a "Last out…" (or "Last blip…") subtext; no tile if the fields are missing (older script).
 
-`API_VERSION = 2`. If you change the API shape in a breaking way, bump it and keep the app tolerant: the app uses `opt*` getters and treats a 404 on `/settings` as an old Pi script.
+| `GET /api/v1/events` | `{api_version, now, last_sample, keep_days, metrics[{id,label,unit}], defaults{...}, trackers[]}`. Tracker: `id,name,metric,metric_label,unit,start_op,start_value,min_s,end_op,end_value,end_hold_s,max_s,enabled,summary,count,kwh,total_s,since,since_epoch` + live `candidate,running,ending,elapsed_s,live_peak,live_kwh,live_value` + `last_event`. |
+| `GET /api/v1/events/<id>` · `/history?limit=N` | One tracker; history is `{tracker,total_events,events[{id,start,end,start_epoch,end_epoch,duration_s,peak,avg,kwh,truncated}]}` (limit default 50, max 1000). |
+| `POST /api/v1/events` · `/events/<id>/update\|pause\|resume\|reset\|delete` | JSON only, body ≤ 4096 bytes. Create returns 201; 404 unknown tracker, 422 validation error. `update` merges fields; `reset` zeroes count/kWh/time and sets `since`, keeps history; `delete` also deletes its events. |
+
+**Events engine** (`EventEngine`, v1.12+): fed from the poll loop on every good block-0 read (~2 s). Read-only with respect to the inverter. State is in SQLite `~pi/powhvm6-events.db` (WAL; tables `trackers`, `events`, `meta`). A tracker starts a candidate when `metric <start_op> start_value`, counts once it has lasted `min_s`, and ends when `metric <end_op> end_value` has held `end_hold_s` (end time and kWh are taken at the first ending sample, so the start/end gap gives hysteresis). Energy is a trapezoid integral of W metrics (gaps > 15 s are skipped). `max_s` closes an event as `truncated` and latches until the end condition is seen. A > 120 s data gap closes an active event at its last sample. An event in progress is lost if the script restarts. History older than 90 days is pruned hourly. "Well pump" is seeded once on first start.
+
+`API_VERSION = 3` (events added in v1.12). If you change the API shape in a breaking way, bump it and keep the app tolerant: the app uses `opt*` getters and treats a 404 on `/settings` as an old Pi script.
 
 ## 4. Modbus and register map highlights
 

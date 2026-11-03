@@ -22,6 +22,7 @@ import os
 import queue
 import shutil
 import socket
+import sqlite3
 import sys
 import threading
 import time
@@ -45,7 +46,7 @@ DISCOVER_MAGIC = b"powhvm6-discover"
 MODEL = "POW-HVM6.2M-48V-N"
 # Set to False to turn POST /api/v1/set off without touching the registry.
 WRITES_ENABLED = True
-API_VERSION = 2
+API_VERSION = 3
 
 # Linux console colors. Cyan is idle so green and red stay unambiguous.
 CYAN = "\033[36m"
@@ -1307,6 +1308,437 @@ def downsample_history(points: int = 360) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Power event trackers (read-only with respect to the inverter).
+#
+# A tracker is a generic rule on one reading. An event starts when the start
+# condition is true, ends once the end condition has held for end_hold_s, and
+# counts only if it lasted at least min_s. While it runs the engine integrates
+# the reading over time (W -> kWh for watt metrics) and keeps the peak.
+# Trackers, finished events and per-tracker totals live in SQLite
+# (EVENTS_DB). Reset clears count/kWh/time totals, never the history.
+# The engine is fed by the poll loop, so it runs with no app connected.
+# ---------------------------------------------------------------------------
+EVENTS_DB = os.path.expanduser("~/powhvm6-events.db")
+EVENT_KEEP_DAYS = 90
+EVENT_MAX_GAP_S = 15.0      # longer gaps between samples aren't integrated
+EVENT_STALE_S = 120.0       # no sample for this long while active: end the event at the last sample
+MAX_TRACKERS = 50
+EVENT_OPS = (">", "<")
+
+# Metric id -> (label, unit, extractor on block-0 registers).
+EVENT_METRICS = {
+    "load_power": ("Output power", "W", lambda r: float(r[11])),
+    "load_percent": ("Load percent", "%", lambda r: float(r[13])),
+    "pv_power": ("PV power", "W", lambda r: float(r[4])),
+    # V x (charge - discharge): + while charging, - while discharging.
+    "battery_power": ("Battery power (+chg/-dis)", "W", lambda r: round(r[5] / 10.0 * (float(r[7]) - float(r[8])), 1)),
+    "battery": ("Battery voltage", "V", lambda r: r[5] / 10.0),
+    "battery_soc": ("Battery SoC", "%", lambda r: float(r[6])),
+    "charge": ("Charge current", "A", lambda r: float(r[7])),
+    "discharge": ("Discharge current", "A", lambda r: float(r[8])),
+    "ac_voltage": ("AC input voltage", "V", lambda r: r[1] / 10.0),
+    "pv_voltage": ("PV voltage", "V", lambda r: r[3] / 10.0),
+}
+
+TRACKER_COLS = ("name", "metric", "start_op", "start_value", "min_s", "end_op", "end_value",
+                "end_hold_s", "max_s", "enabled")
+
+SEED_TRACKERS = [
+    {"name": "Well pump", "metric": "load_power", "start_op": ">", "start_value": 800.0,
+     "min_s": 30.0, "end_op": "<", "end_value": 600.0, "end_hold_s": 10.0, "max_s": 3600.0,
+     "enabled": True},
+]
+
+
+def metric_values(regs) -> dict:
+    out = {}
+    for mid, (_, _, fn) in EVENT_METRICS.items():
+        try:
+            out[mid] = fn(regs)
+        except Exception:
+            pass
+    return out
+
+
+def _cmp(op, a, b) -> bool:
+    return a > b if op == ">" else a < b
+
+
+def _num(body, key, lo, hi, default=None, allow_none=False):
+    v = body.get(key, default)
+    if v is None and allow_none:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        raise ValueError(f"{key} must be a number")
+    if not (lo <= v <= hi):
+        raise ValueError(f"{key} must be between {lo:g} and {hi:g}")
+    return float(v)
+
+
+def validate_tracker(body, base=None) -> dict:
+    """Return a clean tracker dict from a JSON body (missing keys from base), or raise ValueError."""
+    if not isinstance(body, dict):
+        raise ValueError("body must be a JSON object")
+    src = dict(base or {})
+    src.update({k: v for k, v in body.items() if k in TRACKER_COLS})
+    name = src.get("name")
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 40:
+        raise ValueError("name must be 1-40 characters")
+    metric = src.get("metric", "load_power")
+    if metric not in EVENT_METRICS:
+        raise ValueError(f"metric must be one of {', '.join(EVENT_METRICS)}")
+    out = {"name": name.strip(), "metric": metric}
+    for k in ("start_op", "end_op"):
+        op = src.get(k, ">" if k == "start_op" else "<")
+        if op not in EVENT_OPS:
+            raise ValueError(f"{k} must be > or <")
+        out[k] = op
+    out["start_value"] = _num(src, "start_value", -1e6, 1e6)
+    out["end_value"] = _num(src, "end_value", -1e6, 1e6)
+    out["min_s"] = _num(src, "min_s", 0, 86400, 0)
+    out["end_hold_s"] = _num(src, "end_hold_s", 0, 3600, 0)
+    max_s = src.get("max_s")
+    out["max_s"] = None if max_s in (None, 0) else _num(src, "max_s", 1, 7 * 86400)
+    if out["max_s"] is not None and out["max_s"] < out["min_s"]:
+        raise ValueError("max_s must be at least min_s")
+    en = src.get("enabled", True)
+    if not isinstance(en, bool):
+        raise ValueError("enabled must be true or false")
+    out["enabled"] = en
+    # An end condition that is already true at the start threshold would end
+    # every event on its first sample; require some hysteresis.
+    if _cmp(out["end_op"], out["start_value"], out["end_value"]):
+        raise ValueError("the end condition can't already be true at the start threshold")
+    return out
+
+
+def tracker_summary(t) -> str:
+    unit = EVENT_METRICS.get(t["metric"], ("", "", None))[1]
+    label = EVENT_METRICS.get(t["metric"], (t["metric"], "", None))[0]
+
+    def n(v):
+        return f"{v:g}"
+
+    s = (f"{label} {t['start_op']} {n(t['start_value'])} {unit} for {n(t['min_s'])} s; "
+         f"ends {t['end_op']} {n(t['end_value'])} {unit} for {n(t['end_hold_s'])} s")
+    if t.get("max_s"):
+        s += f"; max {n(t['max_s'] / 60.0)} min"
+    return s
+
+
+class _Live:
+    """In-memory state of one tracker's current candidate event."""
+
+    def __init__(self):
+        self.active = False
+        self.latched = False   # max duration hit: wait for the end condition before re-arming
+        self.start = None
+        self.last_t = None
+        self.last_v = None
+        self.integral = 0.0    # value x seconds
+        self.peak = None
+        self.end_mark = None   # (t, integral, peak) when the end condition first became true
+
+
+class EventEngine:
+    def __init__(self, path=EVENTS_DB):
+        self.path = path
+        self.lock = threading.Lock()
+        self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=NORMAL")
+        self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS trackers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL, metric TEXT NOT NULL,
+                start_op TEXT NOT NULL, start_value REAL NOT NULL, min_s REAL NOT NULL,
+                end_op TEXT NOT NULL, end_value REAL NOT NULL, end_hold_s REAL NOT NULL,
+                max_s REAL, enabled INTEGER NOT NULL DEFAULT 1,
+                created REAL NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0, kwh REAL NOT NULL DEFAULT 0,
+                total_s REAL NOT NULL DEFAULT 0, since REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tracker_id INTEGER NOT NULL,
+                start REAL NOT NULL, end REAL NOT NULL, duration_s REAL NOT NULL,
+                peak REAL, avg REAL, kwh REAL, truncated INTEGER NOT NULL DEFAULT 0);
+            CREATE INDEX IF NOT EXISTS events_tracker ON events(tracker_id, start);
+            CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+        """)
+        self.live = {}
+        self.last_sample = None
+        self.next_prune = 0.0
+        if self.db.execute("SELECT v FROM meta WHERE k='seeded'").fetchone() is None:
+            for t in SEED_TRACKERS:
+                self._insert(validate_tracker(t), time.time())
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES ('seeded', '1')")
+        self.trackers = self._load()
+
+    # -- storage -----------------------------------------------------------
+    def _load(self) -> dict:
+        return {r["id"]: dict(r) for r in self.db.execute("SELECT * FROM trackers ORDER BY id")}
+
+    def _insert(self, t, now) -> int:
+        cur = self.db.execute(
+            "INSERT INTO trackers (name, metric, start_op, start_value, min_s, end_op, end_value,"
+            " end_hold_s, max_s, enabled, created, since) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (t["name"], t["metric"], t["start_op"], t["start_value"], t["min_s"], t["end_op"],
+             t["end_value"], t["end_hold_s"], t["max_s"], int(t["enabled"]), now, now))
+        return cur.lastrowid
+
+    def _record(self, t, start, end, integral, peak, truncated) -> None:
+        dur = max(0.0, end - start)
+        if dur < t["min_s"]:
+            return
+        unit = EVENT_METRICS[t["metric"]][1]
+        kwh = integral / 3.6e6 if unit == "W" else None
+        avg = integral / dur if dur > 0 else peak
+        self.db.execute(
+            "INSERT INTO events (tracker_id, start, end, duration_s, peak, avg, kwh, truncated)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (t["id"], start, end, dur, peak, avg, kwh, int(truncated)))
+        self.db.execute("UPDATE trackers SET count = count + 1, kwh = kwh + ?, total_s = total_s + ?"
+                        " WHERE id = ?", (kwh or 0.0, dur, t["id"]))
+        row = self.db.execute("SELECT count, kwh, total_s FROM trackers WHERE id=?", (t["id"],)).fetchone()
+        if row and t["id"] in self.trackers:
+            self.trackers[t["id"]].update(dict(row))
+
+    def _prune(self, now) -> None:
+        if now < self.next_prune:
+            return
+        self.next_prune = now + 3600
+        self.db.execute("DELETE FROM events WHERE end < ?", (now - EVENT_KEEP_DAYS * 86400,))
+
+    # -- engine ------------------------------------------------------------
+    def _finish(self, t, lv, end, integral, peak, truncated=False) -> None:
+        self._record(t, lv.start, end, integral, peak, truncated)
+        lv.active = False
+        lv.start = None
+        lv.integral = 0.0
+        lv.peak = None
+        lv.end_mark = None
+
+    def feed(self, now, values) -> None:
+        """One good sample: epoch seconds and {metric: value}. Called from the poll loop."""
+        with self.lock:
+            gap = None if self.last_sample is None else now - self.last_sample
+            for tid, t in self.trackers.items():
+                lv = self.live.setdefault(tid, _Live())
+                if not t["enabled"]:
+                    continue
+                v = values.get(t["metric"])
+                if v is None:
+                    continue
+                if lv.active and gap is not None and gap > EVENT_STALE_S:
+                    # Link was down for a long time: close the event at the last sample.
+                    end, integ, pk = lv.end_mark or (lv.last_t, lv.integral, lv.peak)
+                    self._finish(t, lv, end, integ, pk)
+                if lv.active:
+                    dt = now - lv.last_t
+                    if 0 < dt <= EVENT_MAX_GAP_S:
+                        lv.integral += (lv.last_v + v) / 2.0 * dt
+                    lv.peak = v if lv.peak is None else (max(lv.peak, v) if t["start_op"] == ">" else min(lv.peak, v))
+                    lv.last_t, lv.last_v = now, v
+                    if _cmp(t["end_op"], v, t["end_value"]):
+                        if lv.end_mark is None:
+                            lv.end_mark = (now, lv.integral, lv.peak)
+                        if now - lv.end_mark[0] >= t["end_hold_s"]:
+                            self._finish(t, lv, *lv.end_mark)
+                            continue
+                    else:
+                        lv.end_mark = None
+                    if t["max_s"] and now - lv.start >= t["max_s"]:
+                        self._finish(t, lv, now, lv.integral, lv.peak, truncated=True)
+                        lv.latched = True
+                    continue
+                if lv.latched:
+                    if _cmp(t["end_op"], v, t["end_value"]):
+                        lv.latched = False
+                    else:
+                        continue
+                if _cmp(t["start_op"], v, t["start_value"]):
+                    lv.active = True
+                    lv.start = now
+                    lv.last_t, lv.last_v = now, v
+                    lv.integral = 0.0
+                    lv.peak = v
+                    lv.end_mark = None
+            self.last_sample = now
+            self._prune(now)
+
+    # -- API ---------------------------------------------------------------
+    def _tracker_api(self, t, now) -> dict:
+        lv = self.live.get(t["id"]) or _Live()
+        unit = EVENT_METRICS[t["metric"]][1]
+        running = bool(lv.active and t["enabled"])
+        # Through the last sample (at most one poll behind); the app ticks a local timer on top.
+        elapsed = (lv.last_t - lv.start) if running else None
+        last = self.db.execute("SELECT * FROM events WHERE tracker_id=? ORDER BY start DESC LIMIT 1",
+                               (t["id"],)).fetchone()
+        return {
+            "id": t["id"], "name": t["name"], "metric": t["metric"],
+            "metric_label": EVENT_METRICS[t["metric"]][0], "unit": unit,
+            "start_op": t["start_op"], "start_value": t["start_value"], "min_s": t["min_s"],
+            "end_op": t["end_op"], "end_value": t["end_value"], "end_hold_s": t["end_hold_s"],
+            "max_s": t["max_s"], "enabled": bool(t["enabled"]),
+            "summary": tracker_summary(t),
+            "count": t["count"], "kwh": round(t["kwh"], 4), "total_s": round(t["total_s"], 1),
+            "since": iso_local(t["since"]), "since_epoch": t["since"],
+            # candidate = start condition seen but not yet min_s long; running = counts already
+            "candidate": running and elapsed < t["min_s"],
+            "running": running and elapsed >= t["min_s"],
+            "ending": running and lv.end_mark is not None,
+            "elapsed_s": None if elapsed is None else round(elapsed, 1),
+            "live_peak": lv.peak if running else None,
+            "live_kwh": round(lv.integral / 3.6e6, 4) if running and unit == "W" else None,
+            "live_value": lv.last_v if running else None,
+            "last_event": self._event_api(last) if last else None,
+        }
+
+    @staticmethod
+    def _event_api(r) -> dict:
+        return {"id": r["id"], "tracker_id": r["tracker_id"],
+                "start": iso_local(r["start"]), "end": iso_local(r["end"]),
+                "start_epoch": r["start"], "end_epoch": r["end"],
+                "duration_s": round(r["duration_s"], 1),
+                "peak": r["peak"], "avg": None if r["avg"] is None else round(r["avg"], 1),
+                "kwh": None if r["kwh"] is None else round(r["kwh"], 4),
+                "truncated": bool(r["truncated"])}
+
+    def list_api(self) -> dict:
+        with self.lock:
+            now = time.time()
+            return {
+                "api_version": API_VERSION,
+                "now": iso_local(now),
+                "last_sample": iso_local(self.last_sample),
+                "keep_days": EVENT_KEEP_DAYS,
+                "metrics": [{"id": k, "label": v[0], "unit": v[1]} for k, v in EVENT_METRICS.items()],
+                "defaults": dict(SEED_TRACKERS[0], name="New tracker"),
+                "trackers": [self._tracker_api(t, now) for t in self.trackers.values()],
+            }
+
+    def get_api(self, tid) -> dict:
+        with self.lock:
+            t = self.trackers.get(tid)
+            if t is None:
+                raise KeyError(tid)
+            return self._tracker_api(t, time.time())
+
+    def history_api(self, tid, limit=50) -> dict:
+        with self.lock:
+            t = self.trackers.get(tid)
+            if t is None:
+                raise KeyError(tid)
+            rows = self.db.execute("SELECT * FROM events WHERE tracker_id=? ORDER BY start DESC LIMIT ?",
+                                   (tid, max(1, min(int(limit), 1000)))).fetchall()
+            total = self.db.execute("SELECT COUNT(*) FROM events WHERE tracker_id=?", (tid,)).fetchone()[0]
+            return {"tracker": self._tracker_api(t, time.time()), "total_events": total,
+                    "events": [self._event_api(r) for r in rows]}
+
+    def create(self, body) -> dict:
+        t = validate_tracker(body)
+        with self.lock:
+            if len(self.trackers) >= MAX_TRACKERS:
+                raise ValueError(f"at most {MAX_TRACKERS} trackers")
+            tid = self._insert(t, time.time())
+            self.trackers = self._load()
+        return self.get_api(tid)
+
+    def update(self, tid, body) -> dict:
+        with self.lock:
+            old = self.trackers.get(tid)
+            if old is None:
+                raise KeyError(tid)
+            t = validate_tracker(body, base={k: old[k] for k in TRACKER_COLS} | {"enabled": bool(old["enabled"])})
+            rule_changed = any(t[k] != old[k] for k in TRACKER_COLS if k not in ("name", "enabled"))
+            self.db.execute(
+                "UPDATE trackers SET name=?, metric=?, start_op=?, start_value=?, min_s=?, end_op=?,"
+                " end_value=?, end_hold_s=?, max_s=?, enabled=? WHERE id=?",
+                (t["name"], t["metric"], t["start_op"], t["start_value"], t["min_s"], t["end_op"],
+                 t["end_value"], t["end_hold_s"], t["max_s"], int(t["enabled"]), tid))
+            lv = self.live.get(tid)
+            if lv and lv.active and (rule_changed or not t["enabled"]):
+                # Close the running event under the old rule (counted only if long enough).
+                end, integ, pk = lv.end_mark or (lv.last_t, lv.integral, lv.peak)
+                self._finish(old, lv, end, integ, pk)
+            if lv and (rule_changed or not t["enabled"]):
+                lv.latched = False
+            self.trackers = self._load()
+        return self.get_api(tid)
+
+    def set_enabled(self, tid, enabled) -> dict:
+        return self.update(tid, {"enabled": bool(enabled)})
+
+    def reset(self, tid) -> dict:
+        with self.lock:
+            if tid not in self.trackers:
+                raise KeyError(tid)
+            self.db.execute("UPDATE trackers SET count=0, kwh=0, total_s=0, since=? WHERE id=?",
+                            (time.time(), tid))
+            self.trackers = self._load()
+        return self.get_api(tid)
+
+    def delete(self, tid) -> dict:
+        with self.lock:
+            if tid not in self.trackers:
+                raise KeyError(tid)
+            self.db.execute("DELETE FROM events WHERE tracker_id=?", (tid,))
+            self.db.execute("DELETE FROM trackers WHERE id=?", (tid,))
+            self.live.pop(tid, None)
+            self.trackers = self._load()
+        return {"ok": True, "deleted": tid}
+
+
+events_engine = None  # created in main(); None when the database can't be opened
+
+
+def handle_events_request(method, path, query, body):
+    """Route /api/v1/events... Returns (code, payload)."""
+    eng = events_engine
+    if eng is None:
+        return 503, {"ok": False, "message": "event tracker database unavailable"}
+    parts = [p for p in path.split("/") if p][3:]  # after api, v1, events
+    try:
+        if method == "GET":
+            if not parts:
+                return 200, eng.list_api()
+            tid = int(parts[0])
+            if len(parts) == 1:
+                return 200, eng.get_api(tid)
+            if len(parts) == 2 and parts[1] == "history":
+                limit = 50
+                for kv in query.split("&"):
+                    if kv.startswith("limit="):
+                        limit = int(kv[6:])
+                return 200, eng.history_api(tid, limit)
+            return 404, {"ok": False, "message": "not found"}
+        # POST
+        if not parts:
+            return 201, eng.create(body)
+        tid = int(parts[0])
+        action = parts[1] if len(parts) > 1 else "update"
+        if len(parts) > 2:
+            return 404, {"ok": False, "message": "not found"}
+        if action == "update":
+            return 200, eng.update(tid, body)
+        if action == "pause":
+            return 200, eng.set_enabled(tid, False)
+        if action == "resume":
+            return 200, eng.set_enabled(tid, True)
+        if action == "reset":
+            return 200, eng.reset(tid)
+        if action == "delete":
+            return 200, eng.delete(tid)
+        return 404, {"ok": False, "message": f"unknown action {action!r}"}
+    except KeyError:
+        return 404, {"ok": False, "message": "no such tracker"}
+    except ValueError as exc:
+        return 422, {"ok": False, "message": str(exc)}
+
+
 class ApiHandler(BaseHTTPRequestHandler):
     server_version = "PowHVM6/1.0"
 
@@ -1337,6 +1769,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             )
         elif path == "/api/v1/settings":
             self._json(200, settings_payload())
+        elif path == "/api/v1/events" or path.startswith("/api/v1/events/"):
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            try:
+                code, payload = handle_events_request("GET", path, query, None)
+            except Exception as exc:
+                code, payload = 500, {"ok": False, "message": f"{type(exc).__name__}: {exc}"}
+            self._json(code, payload)
         elif path == "/":
             self._json(
                 200,
@@ -1347,6 +1786,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                         "GET /api/v1/identity",
                         "GET /api/v1/settings",
                         "POST /api/v1/set",
+                        "GET /api/v1/events",
+                        "POST /api/v1/events",
+                        "GET /api/v1/events/<id>",
+                        "GET /api/v1/events/<id>/history?limit=N",
+                        "POST /api/v1/events/<id>/update|pause|resume|reset|delete",
                     ],
                 },
             )
@@ -1355,6 +1799,9 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
+        if path == "/api/v1/events" or path.startswith("/api/v1/events/"):
+            self._post_events(path)
+            return
         if path != "/api/v1/set":
             self._json(404, {"error": "not found"})
             return
@@ -1419,6 +1866,31 @@ class ApiHandler(BaseHTTPRequestHandler):
             write_lock.release()
 
 
+    def _post_events(self, path) -> None:
+        """Event trackers only touch the Pi's own database, never the inverter."""
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            self._json(415, {"ok": False, "message": "Content-Type must be application/json"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length < 0 or length > 4096:
+            self._json(400, {"ok": False, "message": "bad body length"})
+            return
+        try:
+            body = json.loads(self.rfile.read(length)) if length else {}
+        except Exception:
+            self._json(400, {"ok": False, "message": "body must be JSON"})
+            return
+        try:
+            code, payload = handle_events_request("POST", path, "", body)
+        except Exception as exc:
+            code, payload = 500, {"ok": False, "message": f"{type(exc).__name__}: {exc}"}
+        self._json(code, payload)
+
+
 def start_api() -> None:
     server = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), ApiHandler)
     server.daemon_threads = True
@@ -1444,6 +1916,11 @@ def discovery_thread() -> None:
 
 
 def main() -> None:
+    global events_engine
+    try:
+        events_engine = EventEngine()
+    except Exception as exc:
+        print(f"  event trackers disabled: {type(exc).__name__}: {exc}", flush=True)
     start_api()
     threading.Thread(target=discovery_thread, daemon=True).start()
     print("\033[2J\033[H\033[36;1mPOW-HVM6\033[0m\n\n  opening serial...", flush=True)
@@ -1477,6 +1954,11 @@ def main() -> None:
                 remember(history, regs, activity)
                 with api_lock:
                     feed.note(regs)
+                if events_engine is not None:
+                    try:
+                        events_engine.feed(time.time(), metric_values(regs))
+                    except Exception:
+                        pass  # trackers must never stop the poll loop
             if dead:
                 drops2 += 1
                 err2 = err1

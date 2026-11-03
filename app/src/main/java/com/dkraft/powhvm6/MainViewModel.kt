@@ -298,6 +298,121 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (edit?.stage == EditStage.WRITING) return  // can't abandon a write mid-flight
         edit = null
     }
+
+    // ---- Events (generic power-event trackers held on the Pi; read-only w.r.t. the inverter) ----
+
+    var events by mutableStateOf<EventsList?>(null)
+        private set
+    /** Wall clock when [events] arrived; the UI ticks live timers from here. */
+    var eventsFetchedAtMs by mutableStateOf(0L)
+        private set
+    var eventsError by mutableStateOf<String?>(null)
+        private set
+    var eventsBusy by mutableStateOf(false)
+        private set
+    var eventHistory by mutableStateOf<EventHistory?>(null)
+        private set
+    var eventHistoryError by mutableStateOf<String?>(null)
+        private set
+    private var eventsJob: Job? = null
+    /** Set by the activity; the Events poll idles while the app is in the background. */
+    @Volatile var appForeground = true
+
+    /** Run [block] against the active route; on a network failure try the other route once. */
+    private suspend fun <T> onRoute(block: (String) -> T): T = withContext(Dispatchers.IO) {
+        val first = currentHost()
+        try {
+            block(first)
+        } catch (e: java.io.IOException) {
+            val other = listOf(settings.host, settings.fallbackAddr)
+                .firstOrNull { it.isNotEmpty() && it != first } ?: throw e
+            block(other)
+        }
+    }
+
+    private fun msg(e: Throwable): String = when (e) {
+        is java.net.SocketTimeoutException -> "Pi didn't answer (timeout)"
+        is java.io.IOException -> "Can't reach the Pi: ${e.message ?: e.javaClass.simpleName}"
+        else -> e.message ?: e.javaClass.simpleName
+    }
+
+    suspend fun refreshEvents() {
+        if (currentHost().isEmpty()) return
+        try {
+            val l = onRoute { EventsApi.list(it) }
+            events = l
+            eventsFetchedAtMs = System.currentTimeMillis()
+            eventsError = null
+        } catch (e: Exception) {
+            eventsError = msg(e)
+        }
+    }
+
+    /** Poll the tracker list every 3 s while the Events tab is on screen. */
+    fun startEventsPolling() {
+        if (eventsJob?.isActive == true) return
+        eventsJob = viewModelScope.launch {
+            while (true) {
+                if (appForeground) refreshEvents()
+                delay(3000)
+            }
+        }
+    }
+
+    fun stopEventsPolling() {
+        eventsJob?.cancel()
+        eventsJob = null
+    }
+
+    fun loadEventHistory(id: Long) {
+        viewModelScope.launch {
+            eventHistoryError = null
+            try {
+                eventHistory = onRoute { EventsApi.history(it, id, 200) }
+            } catch (e: Exception) {
+                eventHistoryError = msg(e)
+            }
+        }
+    }
+
+    fun clearEventHistory() {
+        eventHistory = null
+        eventHistoryError = null
+    }
+
+    /** Create (id == null) or update a tracker. [done] gets null on success, else the error text. */
+    fun saveTracker(id: Long?, draft: TrackerDraft, done: (String?) -> Unit) {
+        viewModelScope.launch {
+            eventsBusy = true
+            val err = try {
+                draft.toJson() // local number check before going to the network
+                onRoute { if (id == null) EventsApi.create(it, draft) else EventsApi.update(it, id, draft) }
+                null
+            } catch (e: Exception) {
+                msg(e)
+            }
+            if (err == null) refreshEvents()
+            eventsBusy = false
+            done(err)
+        }
+    }
+
+    /** pause | resume | reset | delete */
+    fun trackerAction(id: Long, action: String) {
+        viewModelScope.launch {
+            eventsBusy = true
+            try {
+                onRoute { EventsApi.action(it, id, action) }
+                refreshEvents()
+                if (eventHistory?.tracker?.id == id) {
+                    if (action == "delete") clearEventHistory() else loadEventHistory(id)
+                }
+            } catch (e: Exception) {
+                eventsError = msg(e)
+            }
+            eventsBusy = false
+        }
+    }
 }
 
 private const val PRIMARY_TIMEOUT_MS = 3000
