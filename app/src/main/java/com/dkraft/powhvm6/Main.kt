@@ -50,10 +50,31 @@ class MainActivity : ComponentActivity() {
                 else SystemBarStyle.light(AndroidColor.TRANSPARENT, AndroidColor.TRANSPARENT)
                 enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
             }
+            LaunchedEffect(vm.keepScreenOn) { applyKeepScreenOn() }
             PowHvmTheme(nightMode = dark) {
                 AppRoot(vm)
             }
         }
+    }
+
+    private var foreground = false
+
+    override fun onResume() {
+        super.onResume()
+        foreground = true
+        applyKeepScreenOn()
+    }
+
+    override fun onPause() {
+        foreground = false
+        applyKeepScreenOn()
+        super.onPause()
+    }
+
+    /** FLAG_KEEP_SCREEN_ON only while the setting is on and the activity is in the foreground. */
+    private fun applyKeepScreenOn() {
+        val flag = android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        if (vm.keepScreenOn && foreground) window.addFlags(flag) else window.clearFlags(flag)
     }
 }
 

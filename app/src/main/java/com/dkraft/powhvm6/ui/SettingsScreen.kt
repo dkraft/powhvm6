@@ -120,6 +120,25 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
 
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Keep screen on while open", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Only while powhvm6 is in the foreground.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
+                    Switch(checked = vm.keepScreenOn, onCheckedChange = { vm.updateKeepScreenOn(it) })
+                }
+            }
+        }
+
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("Temperature unit", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(12.dp))

@@ -33,6 +33,11 @@ class Settings(private val ctx: Context) {
         get() = TempUnit.values().firstOrNull { it.name == prefs.getString("temp_unit", null) } ?: TempUnit.FAHRENHEIT
         set(v) = prefs.edit().putString("temp_unit", v.name).apply()
 
+    /** Keep the display awake while the app is in the foreground. Default off. */
+    var keepScreenOn: Boolean
+        get() = prefs.getBoolean("keep_screen_on", false)
+        set(v) = prefs.edit().putBoolean("keep_screen_on", v).apply()
+
     /** Returns the set of hidden field ids. Empty means show all. */
     fun hiddenFields(): Set<String> {
         val s = prefs.getStringSet("hidden", emptySet()) ?: emptySet()

@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.dkraft.powhvm6.BuildConfig
@@ -87,8 +88,12 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
 
     val editable = vm.editableFieldIds()
 
+    val link = linkFields(vm.appLink, snap.piLink).filter { vm.isFieldVisible(it.id) }
+
+    // Scrolling tiles on top; graph + Link (latency / dropped frames) pinned to the bottom.
+    Column(modifier = modifier.fillMaxSize()) {
     LazyColumn(
-        modifier = modifier,
+        modifier = Modifier.weight(1f).fillMaxWidth(),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -129,14 +134,20 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             item { GroupCard(groupName, fields, editable, onEdit = { vm.beginEdit(fieldId = it) }) }
         }
 
-        if (snap.history.isNotEmpty()) {
-            item { HistoryCard(snap.history) }
-        }
+    }
 
-        val link = linkFields(vm.appLink, snap.piLink).filter { vm.isFieldVisible(it.id) }
-        if (link.isNotEmpty()) {
-            item { GroupCard("Link", link) }
+    if (snap.history.isNotEmpty() || link.isNotEmpty()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.background)
+                .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (snap.history.isNotEmpty()) HistoryCard(snap.history)
+            if (link.isNotEmpty()) GroupCard("Link", link)
         }
+    }
     }
 }
 
@@ -266,39 +277,107 @@ fun HistoryCard(history: List<HistoryPoint>) {
     }
 }
 
+/** Y axis fitted to the visible data: padded, snapped to "nice" tick steps. */
+data class AxisScale(val min: Double, val max: Double, val step: Double) {
+    val ticks: List<Double>
+        get() {
+            val out = mutableListOf<Double>()
+            var v = min
+            var guard = 0
+            while (v <= max + step * 1e-6 && guard++ < 20) { out += v; v += step }
+            return out
+        }
+}
+
+private fun niceStep(rough: Double): Double {
+    if (rough <= 0.0 || rough.isNaN() || rough.isInfinite()) return 1.0
+    val mag = Math.pow(10.0, Math.floor(Math.log10(rough)))
+    val norm = rough / mag
+    val nice = when {
+        norm <= 1.0 -> 1.0
+        norm <= 2.0 -> 2.0
+        norm <= 2.5 -> 2.5
+        norm <= 5.0 -> 5.0
+        else -> 10.0
+    }
+    return nice * mag
+}
+
+/**
+ * Fits [values] with ~8% padding and about [targetTicks] rounded ticks.
+ * Flat data (min == max) gets a small window around the value instead of dividing by zero.
+ * [floor]/[ceil] clamp the axis to the quantity's physical range (e.g. 0–100 %).
+ */
+fun autoScale(values: List<Double>, targetTicks: Int = 4, floor: Double? = null, ceil: Double? = null): AxisScale {
+    val finite = values.filter { !it.isNaN() && !it.isInfinite() }
+    if (finite.isEmpty()) return AxisScale(floor ?: 0.0, ceil ?: 1.0, ((ceil ?: 1.0) - (floor ?: 0.0)) / targetTicks)
+    var lo = finite.min()
+    var hi = finite.max()
+    var range = hi - lo
+    if (range < 1e-9) {
+        range = maxOf(Math.abs(hi) * 0.1, 1.0)
+        lo -= range / 2; hi += range / 2
+    } else {
+        lo -= range * 0.08; hi += range * 0.08
+    }
+    if (floor != null) lo = maxOf(lo, floor)
+    if (ceil != null) hi = minOf(hi, ceil)
+    val step = niceStep((hi - lo) / targetTicks)
+    var min = Math.floor(lo / step) * step
+    var max = Math.ceil(hi / step) * step
+    if (floor != null) min = maxOf(min, floor)
+    if (ceil != null) max = minOf(max, ceil)
+    if (max - min < step) max = min + step
+    return AxisScale(min, max, step)
+}
+
+private fun tickLabel(v: Double, step: Double): String {
+    val decimals = when {
+        step >= 1.0 && Math.abs(step - Math.rint(step)) < 1e-9 -> 0
+        Math.abs(step * 10 - Math.rint(step * 10)) < 1e-9 -> 1
+        else -> 2
+    }
+    return String.format(java.util.Locale.US, "%.${decimals}f%%", v)
+}
+
+@OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
 @Composable
 fun LoadGraph(points: List<HistoryPoint>) {
+    // Recomputed whenever a new history list arrives (each poll).
+    val scale = androidx.compose.runtime.remember(points) { autoScale(points.map { it.pct }, floor = 0.0, ceil = 100.0) }
+    val measurer = androidx.compose.ui.text.rememberTextMeasurer()
+    val labelStyle = MaterialTheme.typography.labelSmall.copy(
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+    )
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(140.dp)
+            .height(130.dp)
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
     ) {
         Canvas(modifier = Modifier.fillMaxSize().padding(8.dp)) {
-            val w = size.width
+            val labels = scale.ticks.map { it to measurer.measure(tickLabel(it, scale.step), labelStyle) }
+            val gutter = (labels.maxOfOrNull { it.second.size.width } ?: 0) + 6f
+            val left = gutter
+            val w = size.width - left
             val h = size.height
+            val span = (scale.max - scale.min).takeIf { it > 0 } ?: 1.0
+            fun yOf(v: Double): Float = h - ((v - scale.min) / span).toFloat().coerceIn(0f, 1f) * h
+            for ((v, layout) in labels) {
+                val y = yOf(v)
+                drawLine(Color.Gray.copy(alpha = 0.25f), Offset(left, y), Offset(size.width, y), strokeWidth = 1.5f)
+                val ty = (y - layout.size.height / 2f).coerceIn(0f, h - layout.size.height)
+                drawText(layout, topLeft = Offset(0f, ty))
+            }
             if (points.isEmpty()) return@Canvas
             val n = points.size
             val path = Path()
             for (i in 0 until n) {
-                val x = if (n == 1) 0f else i.toFloat() / (n - 1).toFloat() * w
-                val y = h - (points[i].pct / 100.0).toFloat().coerceIn(0f, 1f) * h
+                val x = left + if (n == 1) 0f else i.toFloat() / (n - 1).toFloat() * w
+                val y = yOf(points[i].pct)
                 if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
             }
             drawPath(path, color = Color(0xFF4FC3F7), style = Stroke(width = 4f, cap = StrokeCap.Round))
-            // baseline
-            drawLine(
-                color = Color.Gray.copy(alpha = 0.4f),
-                start = Offset(0f, h),
-                end = Offset(w, h),
-                strokeWidth = 2f
-            )
-        }
-        // Labels
-        Column(modifier = Modifier.align(Alignment.TopStart)) {
-            Text("100%", style = MaterialTheme.typography.labelSmall)
-            Spacer(Modifier.weight(1f))
-            Text("0%", style = MaterialTheme.typography.labelSmall)
         }
         Row(modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp)) {
             Text("now", style = MaterialTheme.typography.labelSmall)

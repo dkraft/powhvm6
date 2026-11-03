@@ -39,6 +39,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         themeMode = mode
     }
 
+    var keepScreenOn by mutableStateOf(settings.keepScreenOn)
+        private set
+
+    fun updateKeepScreenOn(on: Boolean) {
+        settings.keepScreenOn = on
+        keepScreenOn = on
+    }
+
     var tempUnit by mutableStateOf(settings.tempUnit)
         private set
 
