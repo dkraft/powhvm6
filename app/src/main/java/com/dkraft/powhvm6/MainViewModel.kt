@@ -77,6 +77,78 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private var pollJob: Job? = null
 
+    /** Host the app is currently talking to: the primary (LAN) or the ZeroTier fallback. */
+    @Volatile private var activeHost: String = ""
+    private var onFallback = false
+    private var lastPrimaryTry = 0L
+
+    /** All reads and writes go through whichever route is answering. */
+    fun currentHost(): String = activeHost.ifEmpty { settings.host }
+
+    var fallbackEnabled by mutableStateOf(settings.fallbackEnabled)
+        private set
+    var fallbackHost by mutableStateOf(settings.fallbackHost)
+        private set
+    var fallbackPort by mutableStateOf(settings.fallbackPort)
+        private set
+
+    fun updateFallback(enabled: Boolean, host: String, port: Int) {
+        settings.fallbackEnabled = enabled
+        settings.fallbackHost = host
+        settings.fallbackPort = port
+        fallbackEnabled = settings.fallbackEnabled
+        fallbackHost = settings.fallbackHost
+        fallbackPort = settings.fallbackPort
+        if (!fallbackEnabled && onFallback) {
+            onFallback = false
+            activeHost = settings.host
+        }
+    }
+
+    private suspend fun fetchRoute(host: String, primary: Boolean): Snapshot =
+        withContext(Dispatchers.IO) {
+            if (primary) Api.fetchNow(host, connectMs = PRIMARY_TIMEOUT_MS, readMs = PRIMARY_TIMEOUT_MS)
+            else Api.fetchNow(host)
+        }
+
+    /** One poll: current route, failing over (primary -> fallback) or back (every ~60 s). */
+    private suspend fun pollOnce(primary: String) {
+        val fallback = settings.fallbackAddr
+        val now = System.currentTimeMillis()
+        val order = mutableListOf<Pair<String, Boolean>>()
+        if (onFallback && fallback.isNotEmpty()) {
+            if (now - lastPrimaryTry >= PRIMARY_RETRY_MS) { lastPrimaryTry = now; order += primary to true }
+            order += fallback to false
+            if (order.size == 1) order += primary to true  // fallback down too: try LAN once
+        } else {
+            onFallback = false
+            order += primary to true
+            if (fallback.isNotEmpty()) order += fallback to false
+        }
+        var lastErr: Exception? = null
+        for ((host, isPrimary) in order.distinctBy { it.first }) {
+            val t0 = System.nanoTime()
+            try {
+                val s = fetchRoute(host, isPrimary)
+                val switched = activeHost != host
+                activeHost = host
+                if (!isPrimary && !onFallback) lastPrimaryTry = System.currentTimeMillis()
+                onFallback = !isPrimary
+                appLink = appLink.onRoute(if (isPrimary) "LAN" else "ZeroTier").good((System.nanoTime() - t0) / 1e6)
+                snapshot = s
+                error = null
+                if (switched && settingDefs.isEmpty()) loadSettings()
+                return
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lastErr = e
+            }
+        }
+        appLink = appLink.bad()
+        error = lastErr?.let { it.message ?: it::class.java.simpleName }
+    }
+
     init {
         // Resume polling the saved Pi after an app restart.
         val saved = settings.host
@@ -90,24 +162,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         snapshot = null
         error = null
         appLink = AppLink()
+        activeHost = host
+        onFallback = false
+        lastPrimaryTry = 0L
         settingDefs = emptyList()
         settingsMessage = null
         loadSettings()
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
             while (true) {
-                val t0 = System.nanoTime()
-                try {
-                    val s = withContext(Dispatchers.IO) { Api.fetchNow(host) }
-                    appLink = appLink.good((System.nanoTime() - t0) / 1e6)
-                    snapshot = s
-                    error = null
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    appLink = appLink.bad()
-                    error = e.message ?: e::class.java.simpleName
-                }
+                pollOnce(host)
                 delay(2000)
             }
         }
@@ -146,7 +210,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- Writable inverter settings (registry served by the Pi) ----
 
     fun loadSettings() {
-        val host = settings.host
+        val host = currentHost()
         if (host.isEmpty()) return
         viewModelScope.launch { refreshSettings(host) }
     }
@@ -176,7 +240,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Open the editor for a dashboard field id or a registry key. */
     fun beginEdit(fieldId: String? = null, key: String? = null) {
-        val host = settings.host
+        val host = currentHost()
         edit = EditState(stage = EditStage.LOADING)
         viewModelScope.launch {
             val ok = refreshSettings(host)
@@ -214,7 +278,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val e = edit ?: return
         val def = e.def ?: return
         val v = e.pending ?: return
-        val host = settings.host
+        val host = currentHost()
         edit = e.copy(stage = EditStage.WRITING)
         viewModelScope.launch {
             val result = try {
@@ -235,6 +299,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         edit = null
     }
 }
+
+private const val PRIMARY_TIMEOUT_MS = 3000
+private const val PRIMARY_RETRY_MS = 60_000L
 
 enum class EditStage { LOADING, PICK, CONFIRM, WRITING, DONE, ERROR }
 

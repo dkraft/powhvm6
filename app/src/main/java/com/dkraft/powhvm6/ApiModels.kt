@@ -42,11 +42,15 @@ data class AppLink(
     val msLast: Double? = null,
     val recent: List<Double> = emptyList(),
     val ok: Long = 0,
-    val failed: Long = 0
+    val failed: Long = 0,
+    /** "LAN" (primary host) or "ZeroTier" (fallback host); null before the first answer. */
+    val route: String? = null
 ) {
     val msAvg: Double? get() = if (recent.isEmpty()) null else recent.average()
     fun good(ms: Double) = copy(msLast = ms, recent = (recent + ms).takeLast(30), ok = ok + 1)
     fun bad() = copy(failed = failed + 1)
+    /** New route: keep the counters, restart the latency window so it reflects this route. */
+    fun onRoute(r: String) = if (r == route) this else copy(route = r, msLast = null, recent = emptyList())
 }
 
 data class HistoryPoint(
@@ -139,11 +143,11 @@ object Api {
         )
     }
 
-    fun fetchNow(host: String): Snapshot {
+    fun fetchNow(host: String, connectMs: Int = 4000, readMs: Int = 5000): Snapshot {
         val url = "http://$host/api/v1/now"
         val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-        conn.connectTimeout = 4000
-        conn.readTimeout = 5000
+        conn.connectTimeout = connectMs
+        conn.readTimeout = readMs
         conn.requestMethod = "GET"
         val body = conn.inputStream.bufferedReader().use { it.readText() }
         return parseNow(body)
@@ -327,7 +331,7 @@ fun linkFields(app: AppLink?, pi: PiLink?): List<Field> {
     val out = mutableListOf<Field>()
     if (app != null) {
         val tot = app.ok + app.failed
-        out += Field("diag_app", "App → Pi", "link",
+        out += Field("diag_app", if (app.route != null) "Route: ${app.route}" else "App → Pi", "link",
             "${ms(app.msLast)} · avg ${ms(app.msAvg)}", null,
             sub = "dropped ${app.failed}" + if (tot > 0) String.format(java.util.Locale.US, " · %.1f%% ok", 100.0 * app.ok / tot) else "")
     }

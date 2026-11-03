@@ -33,6 +33,28 @@ class Settings(private val ctx: Context) {
         get() = TempUnit.values().firstOrNull { it.name == prefs.getString("temp_unit", null) } ?: TempUnit.FAHRENHEIT
         set(v) = prefs.edit().putString("temp_unit", v.name).apply()
 
+    /** ZeroTier fallback used when the primary host doesn't answer. */
+    var fallbackEnabled: Boolean
+        get() = prefs.getBoolean("fallback_on", true)
+        set(v) = prefs.edit().putBoolean("fallback_on", v).apply()
+
+    var fallbackHost: String
+        get() = prefs.getString("fallback_host", null)?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_FALLBACK_HOST
+        set(v) = prefs.edit().putString("fallback_host", v.trim()).apply()
+
+    var fallbackPort: Int
+        get() = prefs.getInt("fallback_port", DEFAULT_FALLBACK_PORT).takeIf { it in 1..65535 } ?: DEFAULT_FALLBACK_PORT
+        set(v) = prefs.edit().putInt("fallback_port", v).apply()
+
+    /** "host:port" for the fallback, or "" when it's off or blank. */
+    val fallbackAddr: String
+        get() = if (!fallbackEnabled) "" else HostAddr.normalize("${HostAddr.hostOnly(fallbackHost).ifEmpty { fallbackHost }}:$fallbackPort", fallbackPort)
+
+    companion object {
+        const val DEFAULT_FALLBACK_HOST = "10.242.74.158"
+        const val DEFAULT_FALLBACK_PORT = 18088
+    }
+
     /** Keep the display awake while the app is in the foreground. Default off. */
     var keepScreenOn: Boolean
         get() = prefs.getBoolean("keep_screen_on", false)

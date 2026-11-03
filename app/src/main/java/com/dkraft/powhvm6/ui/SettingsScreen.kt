@@ -73,6 +73,8 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             }
         }
 
+        item { FallbackCard(vm) }
+
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
@@ -236,6 +238,56 @@ fun FieldToggles(vm: MainViewModel) {
                     onCheckedChange = { vm.setFieldVisible(f.id, it) }
                 )
             }
+        }
+    }
+}
+
+@Composable
+fun FallbackCard(vm: MainViewModel) {
+    var hostText by remember { mutableStateOf(vm.fallbackHost) }
+    var portText by remember { mutableStateOf(vm.fallbackPort.toString()) }
+    val portOk = portText.toIntOrNull()?.let { it in 1..65535 } == true
+    fun save(enabled: Boolean = vm.fallbackEnabled) {
+        val port = portText.toIntOrNull()?.takeIf { it in 1..65535 } ?: vm.fallbackPort
+        vm.updateFallback(enabled, hostText.ifBlank { com.dkraft.powhvm6.Settings.DEFAULT_FALLBACK_HOST }, port)
+    }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("ZeroTier fallback", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Used when the server above doesn't answer within 3 s. The LAN is retried every 60 s. Needs the ZeroTier app joined on this phone.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+                Switch(checked = vm.fallbackEnabled, onCheckedChange = { save(it) })
+            }
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = hostText,
+                onValueChange = { hostText = it.trim() },
+                label = { Text("Fallback host") },
+                placeholder = { Text(com.dkraft.powhvm6.Settings.DEFAULT_FALLBACK_HOST) },
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Uri),
+                singleLine = true,
+                enabled = vm.fallbackEnabled,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = portText,
+                onValueChange = { portText = it.filter(Char::isDigit).take(5) },
+                label = { Text("Fallback port") },
+                placeholder = { Text(com.dkraft.powhvm6.Settings.DEFAULT_FALLBACK_PORT.toString()) },
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true,
+                isError = !portOk,
+                enabled = vm.fallbackEnabled,
+                modifier = Modifier.fillMaxWidth()
+            )
+            TextButton(onClick = { save() }, enabled = portOk) { Text("Save fallback") }
         }
     }
 }

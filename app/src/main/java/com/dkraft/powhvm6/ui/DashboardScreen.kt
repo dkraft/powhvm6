@@ -90,7 +90,7 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
 
     val link = linkFields(vm.appLink, snap.piLink).filter { vm.isFieldVisible(it.id) }
 
-    // Scrolling tiles on top; graph + Link (latency / dropped frames) pinned to the bottom.
+    // Scrolling tiles (Link last) on top; only the graph is pinned to the bottom.
     Column(modifier = modifier.fillMaxSize()) {
     LazyColumn(
         modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -134,9 +134,14 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             item { GroupCard(groupName, fields, editable, onEdit = { vm.beginEdit(fieldId = it) }) }
         }
 
+        // Link (route, latency, dropped frames): last scrolling item, just above the pinned graph.
+        if (link.isNotEmpty()) {
+            item { GroupCard("Link", link) }
+        }
+
     }
 
-    if (snap.history.isNotEmpty() || link.isNotEmpty()) {
+    if (snap.history.isNotEmpty()) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -144,8 +149,7 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            if (snap.history.isNotEmpty()) HistoryCard(snap.history)
-            if (link.isNotEmpty()) GroupCard("Link", link)
+            HistoryCard(snap.history)
         }
     }
     }
