@@ -1323,6 +1323,7 @@ EVENTS_DB = os.path.expanduser("~/powhvm6-events.db")
 EVENT_KEEP_DAYS = 90
 EVENT_MAX_GAP_S = 15.0      # longer gaps between samples aren't integrated
 EVENT_STALE_S = 120.0       # no sample for this long while active: end the event at the last sample
+EVENT_CHECKPOINT_S = 10.0   # how often a running event's state is saved (survives a script restart)
 MAX_TRACKERS = 50
 EVENT_OPS = (">", "<")
 
@@ -1439,6 +1440,29 @@ class _Live:
         self.integral = 0.0    # value x seconds
         self.peak = None
         self.end_mark = None   # (t, integral, peak) when the end condition first became true
+        self.saved_at = 0.0    # last time this state was checkpointed to the meta table
+
+    def to_json(self) -> str:
+        return json.dumps({"active": self.active, "latched": self.latched, "start": self.start,
+                           "last_t": self.last_t, "last_v": self.last_v, "integral": self.integral,
+                           "peak": self.peak, "end_mark": self.end_mark})
+
+    @classmethod
+    def from_json(cls, text):
+        d = json.loads(text)
+        lv = cls()
+        lv.active = bool(d.get("active"))
+        lv.latched = bool(d.get("latched"))
+        lv.start = d.get("start")
+        lv.last_t = d.get("last_t")
+        lv.last_v = d.get("last_v")
+        lv.integral = float(d.get("integral") or 0.0)
+        lv.peak = d.get("peak")
+        em = d.get("end_mark")
+        lv.end_mark = tuple(em) if em else None
+        if lv.active and (lv.start is None or lv.last_t is None):
+            lv.active = False
+        return lv
 
 
 class EventEngine:
@@ -1448,7 +1472,8 @@ class EventEngine:
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA synchronous=NORMAL")
+        # FULL: a count/kWh update survives a power cut, not just a script crash (writes are rare).
+        self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS trackers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1475,6 +1500,7 @@ class EventEngine:
                 self._insert(validate_tracker(t), time.time())
             self.db.execute("INSERT OR REPLACE INTO meta VALUES ('seeded', '1')")
         self.trackers = self._load()
+        self._restore_live()
 
     # -- storage -----------------------------------------------------------
     def _load(self) -> dict:
@@ -1504,6 +1530,37 @@ class EventEngine:
         row = self.db.execute("SELECT count, kwh, total_s FROM trackers WHERE id=?", (t["id"],)).fetchone()
         if row and t["id"] in self.trackers:
             self.trackers[t["id"]].update(dict(row))
+
+    # In-progress events are checkpointed to meta ('live:<id>') so a script restart
+    # doesn't lose them: on startup they resume, or close at their last sample if the
+    # restart took longer than EVENT_STALE_S (the normal stale-link rule in feed()).
+    def _restore_live(self) -> None:
+        newest = None
+        for r in self.db.execute("SELECT k, v FROM meta WHERE k LIKE 'live:%'").fetchall():
+            try:
+                tid = int(r["k"].split(":", 1)[1])
+                lv = _Live.from_json(r["v"])
+            except Exception:
+                tid, lv = None, None
+            if tid not in self.trackers or lv is None or not (lv.active or lv.latched):
+                self.db.execute("DELETE FROM meta WHERE k=?", (r["k"],))
+                continue
+            lv.saved_at = 1.0   # row exists: clear it once this state ends
+            self.live[tid] = lv
+            if lv.active and lv.last_t is not None:
+                newest = lv.last_t if newest is None else max(newest, lv.last_t)
+        if newest is not None:
+            self.last_sample = newest
+
+    def _save_live(self, tid, lv, now, force=False) -> None:
+        if not (lv.active or lv.latched):
+            if lv.saved_at:
+                self.db.execute("DELETE FROM meta WHERE k=?", (f"live:{tid}",))
+                lv.saved_at = 0.0
+            return
+        if force or now - lv.saved_at >= EVENT_CHECKPOINT_S:
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (f"live:{tid}", lv.to_json()))
+            lv.saved_at = now
 
     def _prune(self, now) -> None:
         if now < self.next_prune:
@@ -1566,6 +1623,9 @@ class EventEngine:
                     lv.peak = v
                     lv.end_mark = None
             self.last_sample = now
+            for tid, lv in self.live.items():
+                if tid in self.trackers:
+                    self._save_live(tid, lv, now)
             self._prune(now)
 
     # -- API ---------------------------------------------------------------
@@ -1687,6 +1747,7 @@ class EventEngine:
                 raise KeyError(tid)
             self.db.execute("DELETE FROM events WHERE tracker_id=?", (tid,))
             self.db.execute("DELETE FROM trackers WHERE id=?", (tid,))
+            self.db.execute("DELETE FROM meta WHERE k=?", (f"live:{tid}",))
             self.live.pop(tid, None)
             self.trackers = self._load()
         return {"ok": True, "deleted": tid}

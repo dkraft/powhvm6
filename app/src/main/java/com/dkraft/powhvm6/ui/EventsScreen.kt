@@ -292,6 +292,11 @@ private fun TrackerCard(t: Tracker, elapsed: Double?, onClick: () -> Unit, onLon
                 Stat("Energy", if (t.unit == "W") fmtKwh(t.kwh) else "—", Modifier.weight(1f))
                 Stat("Since", fmtDate(t.sinceMs), Modifier.weight(1f))
             }
+            Text(
+                "Totals since reset ${fmtWhen(t.sinceMs)} · run time ${fmtDuration(t.totalS)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
             StatusLine(t, elapsed)
             t.lastEvent?.let { e ->
                 Text(
@@ -356,7 +361,8 @@ private fun HistoryView(
             }
         } else {
             item {
-                val shown = if (h.total > h.events.size) "Latest ${h.events.size} of ${h.total} events" else "${h.total} events"
+                val shown = (if (h.total > h.events.size) "Latest ${h.events.size} of ${h.total} events" else "${h.total} events") +
+                    " in history (kept ${vm.events?.keepDays ?: 90} days; totals above run until reset)"
                 Text(shown, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
             }
             item { HistoryHeader(h.tracker.unit) }

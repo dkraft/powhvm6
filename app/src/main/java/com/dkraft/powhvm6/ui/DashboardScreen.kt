@@ -25,6 +25,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -130,8 +131,11 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             }
         }
 
-        for ((groupName, fields) in groups) {
-            item { GroupCard(groupName, fields, editable, onEdit = { vm.beginEdit(fieldId = it) }) }
+        for ((groupName, fields) in orderGroups(groups)) {
+            item {
+                if (groupName == "live") LiveCard(groupName, fields, editable, onEdit = { vm.beginEdit(fieldId = it) })
+                else GroupCard(groupName, fields, editable, onEdit = { vm.beginEdit(fieldId = it) })
+            }
         }
 
         // Link (route, latency, dropped frames): last scrolling item, just above the pinned graph.
@@ -155,6 +159,105 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     }
 }
 
+/** Pi order (live, battery, solar, status, setpoints) with Status moved up above Battery. */
+fun orderGroups(groups: Map<String, List<Field>>): List<Pair<String, List<Field>>> {
+    val names = groups.keys.toMutableList()
+    if ("status" in names && "battery" in names) {
+        names.remove("status")
+        names.add(names.indexOf("battery"), "status")
+    }
+    return names.map { it to groups.getValue(it) }
+}
+
+private val LOAD_GREEN = Color(0xFF4CAF50)
+private val LOAD_YELLOW = Color(0xFFFFEB3B)
+private val LOAD_RED = Color(0xFFE53935)
+
+/**
+ * Load colour by load percent: solid green to 33.333 %, green→yellow across 33.333–66.667 %,
+ * yellow→red across 66.667–100 %, solid red at 100 % and above (linear RGB blend).
+ */
+fun loadColor(pct: Double?): Color {
+    if (pct == null || pct.isNaN()) return Color.Unspecified
+    val third = 100.0 / 3.0
+    return when {
+        pct <= third -> LOAD_GREEN
+        pct <= 2 * third -> androidx.compose.ui.graphics.lerp(LOAD_GREEN, LOAD_YELLOW, ((pct - third) / third).toFloat())
+        pct < 100.0 -> androidx.compose.ui.graphics.lerp(LOAD_YELLOW, LOAD_RED, ((pct - 2 * third) / third).toFloat())
+        else -> LOAD_RED
+    }
+}
+
+private fun fieldNumber(f: Field?): Double? =
+    f?.number ?: f?.text?.let { Regex("""-?\d+(\.\d+)?""").find(it)?.value?.toDoubleOrNull() }
+
+/** Live card: big colour-coded Load power at the top left, Load percent beside it, then the rest. */
+@Composable
+fun LiveCard(
+    groupName: String,
+    fields: List<Field>,
+    editable: Set<String> = emptySet(),
+    onEdit: (String) -> Unit = {}
+) {
+    val power = fields.firstOrNull { it.id == "load_power" }
+    val pctField = fields.firstOrNull { it.id == "load_percent" }
+    if (power == null) { GroupCard(groupName, fields, editable, onEdit); return }
+    val rest = fields.filter { it.id != "load_power" && it.id != "load_percent" }
+    val target = loadColor(fieldNumber(pctField))
+    val color by androidx.compose.animation.animateColorAsState(
+        targetValue = if (target == Color.Unspecified) MaterialTheme.colorScheme.onSurface else target,
+        animationSpec = androidx.compose.animation.core.tween(durationMillis = 900),
+        label = "loadColor"
+    )
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = groupName.replaceFirstChar { it.uppercase() },
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .then(if (power.id in editable) Modifier.clickable { onEdit(power.id) } else Modifier)
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                ) {
+                    Text(
+                        text = power.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                    Text(
+                        text = power.text,
+                        style = MaterialTheme.typography.displaySmall,
+                        fontWeight = FontWeight.Bold,
+                        color = color,
+                        maxLines = 1
+                    )
+                }
+                if (pctField != null) {
+                    FieldCell(pctField, modifier = Modifier.weight(1f), editable = pctField.id in editable, onEdit = onEdit)
+                } else Spacer(Modifier.weight(1f))
+            }
+            if (rest.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                FieldGrid(rest, editable, onEdit)
+            }
+        }
+    }
+}
+
 @Composable
 fun GroupCard(
     groupName: String,
@@ -175,6 +278,14 @@ fun GroupCard(
                 color = MaterialTheme.colorScheme.primary
             )
             Spacer(Modifier.height(8.dp))
+            FieldGrid(fields, editable, onEdit)
+        }
+    }
+}
+
+@Composable
+private fun FieldGrid(fields: List<Field>, editable: Set<String>, onEdit: (String) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
             val rows = (fields.size + 1) / 2
             for (r in 0 until rows) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -187,7 +298,6 @@ fun GroupCard(
                     else Spacer(Modifier.weight(1f))
                 }
             }
-        }
     }
 }
 
