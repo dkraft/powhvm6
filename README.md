@@ -39,6 +39,7 @@ The same process that owns the serial port also runs an HTTP server and a UDP di
 | `POST http://<ip>:8088/api/v1/set` | Change one registry setting: `{"key": "...", "value": N}` (JSON only). Validated, written, read back. See [SETTINGS.md](SETTINGS.md) |
 | `GET http://<ip>:8088/api/v1/events` | Event trackers: rules, count/kWh since reset, live "running now" state, last event, metric list, form defaults |
 | `GET http://<ip>:8088/api/v1/events/<id>/history?limit=N` | One tracker's recorded events (start, duration, peak, avg, kWh), newest first; kept 90 days |
+| `GET http://<ip>:8088/api/v1/logs?name=chargectl or writes&lines=N` | Last N lines of a whitelisted Pi log (charge-controller or inverter write log). Read-only; no path parameters |
 | `POST http://<ip>:8088/api/v1/events` | Create a tracker (JSON). `POST .../events/<id>/update\|pause\|resume\|reset\|delete` to change one. Never touches the inverter |
 | UDP port 28776 | Discovery. Send `powhvm6-discover`, get back JSON with the HTTP port |
 
@@ -50,8 +51,9 @@ Kotlin + Jetpack Compose, minSdk 26, targetSdk 34. No third-party network librar
 
 | Screen | What it does |
 |---|---|
-| Dashboard (Live tab) | Grouped field cards (live / battery / solar / status / setpoints), a live load-% graph, and a green/red status dot |
-| Settings | Per-field visibility toggles, night-mode switch, IP address input with Connect, and a "Search LAN" button |
+| Dashboard (Live tab) | Grouped field cards (live / battery / solar / status / setpoints) and a green/red status dot |
+| Graph (tab) | Load-% history with a second track for battery state (charge, idle, discharge) |
+| Settings | Per-field visibility toggles, night-mode switch, IP address input with Connect, a "Search LAN" button, and read-only access to the Pi charge-controller and write logs |
 | Events (tab) | Generic power-event trackers held on the Pi (e.g. Well pump: output > 800 W for 30 s, ends < 600 W held 10 s). Cards show the rule, count, kWh since reset and a live "running now" timer; tap for history, + to add, long-press to edit/pause/reset/delete |
 | Search | UDP broadcast first, then parallel /24 subnet scan; tap "Use" on a found device |
 

@@ -28,6 +28,7 @@ import threading
 import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 
 import serial
 
@@ -241,10 +242,9 @@ def output_mode(regs):
 def charge_mode(regs):
     return (
         {
-            0: "Utility first",
-            1: "Solar first",
-            2: "Solar+utility",
-            3: "Solar only",
+            0: "Solar first",
+            1: "Solar + utility",
+            2: "Only solar",
         }.get(regs[35], str(regs[35])),
         regs[35],
     )
@@ -503,10 +503,12 @@ SETTINGS = [
         "note": "Changes where the house load comes from. SBU drains the battery to To grid before using utility.",
     },
     {
-        # Program 16. 5017, mirrored in 4536 (block 0, index 35). Raw values
-        # from the odya ESPHome PowMr config; 1 = Solar first matches this
-        # unit's live reading. 0 (Utility first) is left out: the 6.2 kW
-        # manual has no such charger option.
+        # Program 16. 5017, mirrored in 4536 (block 0, index 35).
+        # Confirmed on this unit via LCD program 16: 0 = Solar first (CSO),
+        # 1 = Solar + utility (SNU), 2 = Only solar (OSO). Value 3 is
+        # rejected with NAK 131, so it is not offered. Earlier docs that
+        # listed 1/2/3 (from the odya ESPHome PowMr config for other
+        # models) were wrong for this hardware.
         "key": "charger_source_priority",
         "label": "Charge mode",
         "description": "Charger source priority: what may charge the battery",
@@ -516,11 +518,11 @@ SETTINGS = [
         "write": {"function": 6, "register": 5017, "scale": 1},
         "read": {"block": 0, "index": 35, "scale": 1},
         "validation": {"type": "enum", "options": {
-            1: "Solar first (utility only when no solar)",
-            2: "Solar + utility",
-            3: "Only solar (never charge from utility)"}},
+            0: "Solar first",
+            1: "Solar + utility",
+            2: "Only solar"}},
         "enabled": True,
-        "note": "Only applies on utility/standby; on battery only solar charges.",
+        "note": "LCD program 16: 0 CSO, 1 SNU, 2 OSO. Only applies on utility/standby; on battery only solar charges.",
     },
     {
         # Program 03. 5019, mirrored in 4538 (block 0, index 37). Raw values
@@ -728,6 +730,55 @@ def run_write_job(ser, job: WriteJob) -> dict:
 
 
 WRITE_LOG = os.path.expanduser("~/powhvm6-writes.log")
+
+# Read-only log tails for GET /api/v1/logs. Keys are the only accepted names;
+# paths are fixed (no user-supplied path).
+LOG_MAX_LINES = 1000
+LOG_DEFAULT_LINES = 200
+LOG_READ_BYTES = 1024 * 1024
+LOG_FILES = {
+    "chargectl": "/home/pi/chargectl/chargectl.log",
+    "writes": "/home/pi/powhvm6-writes.log",
+}
+
+
+def tail_log_lines(path: str, n: int) -> list[str]:
+    """Return the last n lines of path. Does not follow a final symlink."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        start = max(0, size - LOG_READ_BYTES)
+        f.seek(start)
+        data = f.read()
+    text = data.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if start > 0 and lines:
+        lines = lines[1:]
+    return lines[-n:]
+
+
+def handle_logs_request(query: str):
+    """Whitelist-only log tail. Returns (status, payload)."""
+    params = parse_qs(query, keep_blank_values=False)
+    name = (params.get("name") or [""])[0].strip()
+    if name not in LOG_FILES:
+        return 400, {"ok": False, "message": "unknown log; use name=chargectl or name=writes"}
+    raw = (params.get("lines") or [str(LOG_DEFAULT_LINES)])[0]
+    try:
+        n = int(raw)
+    except ValueError:
+        return 400, {"ok": False, "message": "lines must be an integer"}
+    n = max(1, min(n, LOG_MAX_LINES))
+    path = LOG_FILES[name]
+    if not os.path.isfile(path):
+        return 404, {"ok": False, "name": name, "message": "log not found"}
+    try:
+        lines = tail_log_lines(path, n)
+    except OSError as exc:
+        return 500, {"ok": False, "name": name, "message": f"{type(exc).__name__}: {exc}"}
+    return 200, {"ok": True, "name": name, "lines": lines, "returned": len(lines)}
+
 
 
 def log_write(key, result) -> None:
@@ -1302,6 +1353,8 @@ def downsample_history(points: int = 360) -> list[dict]:
             {
                 "age_s": round(now - stamp, 1),
                 "pct": round(pct, 1),
+                "charge_a": round(charge, 1),
+                "discharge_a": round(discharge, 1),
                 "state": state,
             }
         )
@@ -1837,6 +1890,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 code, payload = 500, {"ok": False, "message": f"{type(exc).__name__}: {exc}"}
             self._json(code, payload)
+        elif path == "/api/v1/logs":
+            query = self.path.split("?", 1)[1] if "?" in self.path else ""
+            try:
+                code, payload = handle_logs_request(query)
+            except Exception as exc:
+                code, payload = 500, {"ok": False, "message": f"{type(exc).__name__}: {exc}"}
+            self._json(code, payload)
         elif path == "/":
             self._json(
                 200,
@@ -1852,6 +1912,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         "GET /api/v1/events/<id>",
                         "GET /api/v1/events/<id>/history?limit=N",
                         "POST /api/v1/events/<id>/update|pause|resume|reset|delete",
+                        "GET /api/v1/logs?name=chargectl|writes&lines=N",
                     ],
                 },
             )

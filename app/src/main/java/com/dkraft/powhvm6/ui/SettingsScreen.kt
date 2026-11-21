@@ -108,6 +108,26 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Logs", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Read-only tails of the Pi charge-controller log and the inverter write log.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                    if (vm.settings.host.isEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("Connect to the Pi first.", style = MaterialTheme.typography.bodyMedium)
+                    } else {
+                        TextButton(onClick = { vm.openLog("chargectl") }) { Text("Charge controller log") }
+                        TextButton(onClick = { vm.openLog("writes") }) { Text("Write log") }
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
                     Text("Night mode", style = MaterialTheme.typography.titleMedium)
                     Text(
                         "System follows your phone's dark theme setting.",

@@ -56,7 +56,9 @@ data class AppLink(
 data class HistoryPoint(
     val ageS: Double,
     val pct: Double,
-    val state: String
+    val state: String,
+    val chargeA: Double? = null,
+    val dischargeA: Double? = null
 )
 
 data class Snapshot(
@@ -94,7 +96,9 @@ object Api {
             hist += HistoryPoint(
                 ageS = p.getDouble("age_s"),
                 pct = p.getDouble("pct"),
-                state = p.getString("state")
+                state = p.optString("state", "idle"),
+                chargeA = if (!p.has("charge_a") || p.isNull("charge_a")) null else p.optDouble("charge_a"),
+                dischargeA = if (!p.has("discharge_a") || p.isNull("discharge_a")) null else p.optDouble("discharge_a")
             )
         }
         return Snapshot(
@@ -160,6 +164,46 @@ object Api {
         conn.readTimeout = 3000
         conn.requestMethod = "GET"
         return JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+    }
+}
+
+
+
+data class LogPage(val name: String, val lines: List<String>)
+
+class LogsUnsupported(msg: String) : Exception(msg)
+
+fun logTitle(name: String): String = when (name) {
+    "chargectl" -> "Charge controller log"
+    "writes" -> "Write log"
+    else -> name
+}
+
+object LogsApi {
+    fun fetch(host: String, name: String, lines: Int = 200): LogPage {
+        val url = "http://$host/api/v1/logs?name=$name&lines=$lines"
+        val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        conn.connectTimeout = 4000
+        conn.readTimeout = 8000
+        conn.requestMethod = "GET"
+        val code = conn.responseCode
+        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+        val txt = stream?.bufferedReader()?.use { it.readText() } ?: ""
+        val o = try { JSONObject(txt) } catch (_: Exception) { JSONObject() }
+        if (code == 404) {
+            // Missing file vs old Pi script with no /logs route.
+            if (o.optString("message") == "log not found" || o.has("name")) {
+                throw Exception("${logTitle(name)} is missing on the Pi.")
+            }
+            throw LogsUnsupported("This Pi script doesn't support log access yet. Update hdmi-inverter.py on the Pi.")
+        }
+        if (code != 200) {
+            throw Exception(o.optString("message").ifBlank { "HTTP $code" })
+        }
+        val arr = o.optJSONArray("lines") ?: org.json.JSONArray()
+        val out = mutableListOf<String>()
+        for (i in 0 until arr.length()) out += arr.optString(i)
+        return LogPage(name = o.optString("name", name), lines = out)
     }
 }
 

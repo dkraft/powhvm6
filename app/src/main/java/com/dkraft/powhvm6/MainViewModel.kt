@@ -413,6 +413,51 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             eventsBusy = false
         }
     }
+
+    // ---- Pi logs (read-only) ----
+
+    var logName by mutableStateOf<String?>(null)
+        private set
+    var logLines by mutableStateOf<List<String>>(emptyList())
+        private set
+    var logError by mutableStateOf<String?>(null)
+        private set
+    var logLoading by mutableStateOf(false)
+        private set
+
+    fun openLog(name: String) {
+        logName = name
+        loadLog()
+    }
+
+    fun closeLog() {
+        logName = null
+        logLines = emptyList()
+        logError = null
+        logLoading = false
+    }
+
+    fun loadLog() {
+        val name = logName ?: return
+        val host = currentHost()
+        if (host.isEmpty()) {
+            logError = "No host set."
+            logLines = emptyList()
+            return
+        }
+        logLoading = true
+        logError = null
+        viewModelScope.launch {
+            try {
+                val page = withContext(Dispatchers.IO) { LogsApi.fetch(host, name) }
+                logLines = page.lines
+            } catch (e: Exception) {
+                logLines = emptyList()
+                logError = e.message ?: e::class.java.simpleName
+            }
+            logLoading = false
+        }
+    }
 }
 
 private const val PRIMARY_TIMEOUT_MS = 3000

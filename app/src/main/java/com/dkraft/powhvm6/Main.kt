@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.EventNote
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -33,6 +34,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.dkraft.powhvm6.ui.DashboardScreen
+import com.dkraft.powhvm6.ui.GraphScreen
+import com.dkraft.powhvm6.ui.LogScreen
 import com.dkraft.powhvm6.ui.EventsScreen
 import com.dkraft.powhvm6.ui.SearchScreen
 import com.dkraft.powhvm6.ui.SettingEditorHost
@@ -91,7 +94,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AppRoot(vm: MainViewModel) {
     var screen by remember { mutableStateOf(0) }
-    /** Bottom tab on the main screen: 0 = Live, 1 = Events. */
+    /** Bottom tab on the main screen: 0 = Live, 1 = Events, 2 = Graph. */
     var tab by remember { mutableStateOf(0) }
     /** Tracker whose history is open on the Events tab. */
     var historyId by remember { mutableStateOf<Long?>(null) }
@@ -105,7 +108,8 @@ fun AppRoot(vm: MainViewModel) {
         historyId = null
         vm.clearEventHistory()
     }
-    BackHandler(enabled = screen != 0) { screen = 0 }
+    BackHandler(enabled = screen == 1 && vm.logName != null) { vm.closeLog() }
+    BackHandler(enabled = screen != 0 && vm.logName == null) { screen = 0 }
 
     Scaffold(
         topBar = {
@@ -113,11 +117,14 @@ fun AppRoot(vm: MainViewModel) {
                 title = {
                     Text(
                         text = when (screen) {
-                            0 -> if (tab == 0) "POW-HVM6"
-                                 else if (historyId != null) vm.events?.trackers?.firstOrNull { it.id == historyId }?.name
+                            0 -> when {
+                                tab == 0 -> "POW-HVM6"
+                                tab == 2 -> "Graph"
+                                historyId != null -> vm.events?.trackers?.firstOrNull { it.id == historyId }?.name
                                     ?: vm.eventHistory?.tracker?.name ?: "History"
-                                 else "Events"
-                            1 -> "Settings"
+                                else -> "Events"
+                            }
+                            1 -> if (vm.logName != null) logTitle(vm.logName!!) else "Settings"
                             2 -> "Search"
                             else -> ""
                         }
@@ -127,6 +134,10 @@ fun AppRoot(vm: MainViewModel) {
                     if (eventsVisible && historyId != null) {
                         IconButton(onClick = { historyId = null; vm.clearEventHistory() }) {
                             Icon(Icons.Default.ArrowBack, contentDescription = "Back to events")
+                        }
+                    } else if (screen == 1 && vm.logName != null) {
+                        IconButton(onClick = { vm.closeLog() }) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Back to settings")
                         }
                     }
                 },
@@ -138,8 +149,8 @@ fun AppRoot(vm: MainViewModel) {
                         IconButton(onClick = { screen = 1 }) {
                             Icon(Icons.Default.Settings, contentDescription = "Settings")
                         }
-                    } else {
-                        IconButton(onClick = { screen = 0 }) {
+                    } else if (!(screen == 1 && vm.logName != null)) {
+                        IconButton(onClick = { vm.closeLog(); screen = 0 }) {
                             Icon(Icons.Default.ArrowBack, contentDescription = "Back")
                         }
                     }
@@ -164,20 +175,30 @@ fun AppRoot(vm: MainViewModel) {
                         icon = { Icon(Icons.Default.EventNote, contentDescription = null) },
                         label = { Text("Events") }
                     )
+                    NavigationBarItem(
+                        selected = tab == 2,
+                        onClick = { tab = 2 },
+                        icon = { Icon(Icons.Default.ShowChart, contentDescription = null) },
+                        label = { Text("Graph") }
+                    )
                 }
             }
         }
     ) { pad ->
         when (screen) {
-            0 -> if (tab == 0) DashboardScreen(vm, modifier = Modifier.padding(pad))
-                 else EventsScreen(
-                     vm,
-                     historyId = historyId,
-                     onOpenHistory = { historyId = it; vm.loadEventHistory(it) },
-                     onCloseHistory = { historyId = null; vm.clearEventHistory() },
-                     modifier = Modifier.padding(pad)
-                 )
-            1 -> SettingsScreen(vm, modifier = Modifier.padding(pad))
+            0 -> when (tab) {
+                0 -> DashboardScreen(vm, modifier = Modifier.padding(pad))
+                2 -> GraphScreen(vm, modifier = Modifier.padding(pad))
+                else -> EventsScreen(
+                    vm,
+                    historyId = historyId,
+                    onOpenHistory = { historyId = it; vm.loadEventHistory(it) },
+                    onCloseHistory = { historyId = null; vm.clearEventHistory() },
+                    modifier = Modifier.padding(pad)
+                )
+            }
+            1 -> if (vm.logName != null) LogScreen(vm, modifier = Modifier.padding(pad))
+                 else SettingsScreen(vm, modifier = Modifier.padding(pad))
             2 -> SearchScreen(vm, modifier = Modifier.padding(pad))
         }
         SettingEditorHost(vm)

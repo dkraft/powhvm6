@@ -91,10 +91,8 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
 
     val link = linkFields(vm.appLink, snap.piLink).filter { vm.isFieldVisible(it.id) }
 
-    // Scrolling tiles (Link last) on top; only the graph is pinned to the bottom.
-    Column(modifier = modifier.fillMaxSize()) {
     LazyColumn(
-        modifier = Modifier.weight(1f).fillMaxWidth(),
+        modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -138,24 +136,10 @@ fun DashboardScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
             }
         }
 
-        // Link (route, latency, dropped frames): last scrolling item, just above the pinned graph.
+        // Link (route, latency, dropped frames) last.
         if (link.isNotEmpty()) {
             item { GroupCard("Link", link) }
         }
-
-    }
-
-    if (snap.history.isNotEmpty()) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.background)
-                .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            HistoryCard(snap.history)
-        }
-    }
     }
 }
 
@@ -377,19 +361,66 @@ private fun perBatteryVolts(field: Field): Double? {
 }
 
 @Composable
-fun HistoryCard(history: List<HistoryPoint>) {
+fun HistoryCard(history: List<HistoryPoint>, graphHeight: androidx.compose.ui.unit.Dp = 220.dp) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(
-                "Load % over time",
+                "Load % and battery state",
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.primary
             )
             Spacer(Modifier.height(8.dp))
-            LoadGraph(history)
+            LoadGraph(history, graphHeight)
+            Spacer(Modifier.height(8.dp))
+            StateLegend()
         }
     }
 }
+
+@Composable
+fun StateLegend() {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        LegendSwatch(STATE_CHARGE, "Charge")
+        LegendSwatch(STATE_IDLE, "Idle")
+        LegendSwatch(STATE_DISCHARGE, "Discharge")
+        Spacer(Modifier.weight(1f))
+        Text("Load %", color = Color(0xFF4FC3F7), style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+@Composable
+private fun LegendSwatch(color: Color, label: String) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Box(
+            modifier = Modifier
+                .size(width = 14.dp, height = 4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(color)
+        )
+        Text(label, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+val STATE_CHARGE = Color(0xFF4CAF50)
+val STATE_IDLE = Color(0xFF26C6DA)
+val STATE_DISCHARGE = Color(0xFFE53935)
+
+fun stateLevel(state: String): Int = when (state) {
+    "charging", "charge" -> 2
+    "discharging", "discharge" -> 0
+    else -> 1
+}
+
+fun stateColor(state: String): Color = when (stateLevel(state)) {
+    2 -> STATE_CHARGE
+    0 -> STATE_DISCHARGE
+    else -> STATE_IDLE
+}
+
 
 /** Y axis fitted to the visible data: padded, snapped to "nice" tick steps. */
 data class AxisScale(val min: Double, val max: Double, val step: Double) {
@@ -456,17 +487,22 @@ private fun tickLabel(v: Double, step: Double): String {
 
 @OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
 @Composable
-fun LoadGraph(points: List<HistoryPoint>) {
+fun LoadGraph(points: List<HistoryPoint>, graphHeight: androidx.compose.ui.unit.Dp = 220.dp) {
     // Recomputed whenever a new history list arrives (each poll).
     val scale = androidx.compose.runtime.remember(points) { autoScale(points.map { it.pct }, floor = 0.0, ceil = 100.0) }
     val measurer = androidx.compose.ui.text.rememberTextMeasurer()
     val labelStyle = MaterialTheme.typography.labelSmall.copy(
         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
     )
+    val trackStyle = MaterialTheme.typography.labelSmall.copy(
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+    )
+    val trackH = 36.dp
+    Column(modifier = Modifier.fillMaxWidth()) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(130.dp)
+            .height(graphHeight)
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
     ) {
         Canvas(modifier = Modifier.fillMaxSize().padding(8.dp)) {
@@ -496,5 +532,55 @@ fun LoadGraph(points: List<HistoryPoint>) {
         Row(modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp)) {
             Text("now", style = MaterialTheme.typography.labelSmall)
         }
+    }
+    Spacer(Modifier.height(6.dp))
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(trackH)
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 6.dp)) {
+            val labels = listOf("Dis", "Idle", "Chg").map { measurer.measure(it, trackStyle) }
+            val gutter = (labels.maxOfOrNull { it.size.width } ?: 0) + 6f
+            val left = gutter
+            val w = size.width - left
+            val h = size.height
+            fun yLevel(level: Int): Float = h - (level / 2f) * h
+            for (i in 0..2) {
+                val y = yLevel(i)
+                drawLine(Color.Gray.copy(alpha = 0.2f), Offset(left, y), Offset(size.width, y), strokeWidth = 1f)
+                val layout = labels[i]
+                val ty = (y - layout.size.height / 2f).coerceIn(0f, h - layout.size.height)
+                drawText(layout, topLeft = Offset(0f, ty))
+            }
+            if (points.isEmpty()) return@Canvas
+            val n = points.size
+            val path = Path()
+            for (i in 0 until n) {
+                val x = left + if (n == 1) 0f else i.toFloat() / (n - 1).toFloat() * w
+                val y = yLevel(stateLevel(points[i].state))
+                if (i == 0) path.moveTo(x, y) else {
+                    // Stepped line so state changes are sharp.
+                    val prevY = yLevel(stateLevel(points[i - 1].state))
+                    if (prevY != y) path.lineTo(x, prevY)
+                    path.lineTo(x, y)
+                }
+            }
+            // Colour the stepped path in segments so charge/idle/discharge are distinct.
+            for (i in 0 until n) {
+                val x0 = left + if (n == 1) 0f else i.toFloat() / (n - 1).toFloat() * w
+                val x1 = left + if (n == 1 || i == n - 1) x0 else (i + 1).toFloat() / (n - 1).toFloat() * w
+                val y = yLevel(stateLevel(points[i].state))
+                drawLine(stateColor(points[i].state), Offset(x0, y), Offset(x1, y), strokeWidth = 5f, cap = StrokeCap.Round)
+                if (i < n - 1) {
+                    val y2 = yLevel(stateLevel(points[i + 1].state))
+                    if (y2 != y) drawLine(stateColor(points[i + 1].state), Offset(x1, y), Offset(x1, y2), strokeWidth = 5f, cap = StrokeCap.Round)
+                }
+            }
+            // Keep a faint outline of the whole path for continuity.
+            drawPath(path, color = Color.Transparent)
+        }
+    }
     }
 }

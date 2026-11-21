@@ -28,16 +28,18 @@ App sources:
 
 | File | Role |
 |---|---|
-| `Main.kt` | Activity and navigation: bottom tabs Live (Dashboard) / Events, plus Settings / Search. |
-| `MainViewModel.kt` | Polls `/api/v1/now` every 2 s, loads the settings registry, runs the edit flow (`EditStage`: LOADING → PICK → CONFIRM → WRITING → DONE/ERROR). |
-| `ApiModels.kt` | JSON parsing and HTTP for `/now`, `/identity`, `/settings`, `/set` (`org.json` + `HttpURLConnection`, no third-party network libraries). |
+| `Main.kt` | Activity and navigation: bottom tabs Live (Dashboard) / Events / Graph, plus Settings / Search. |
+| `MainViewModel.kt` | Polls `/api/v1/now` every 2 s, loads the settings registry, runs the edit flow (`EditStage`: LOADING → PICK → CONFIRM → WRITING → DONE/ERROR), and fetches Pi logs. |
+| `ApiModels.kt` | JSON parsing and HTTP for `/now`, `/identity`, `/settings`, `/set`, `/logs` (`org.json` + `HttpURLConnection`, no third-party network libraries). |
 | `Events.kt` | Event tracker models, `EventsApi` (HTTP for `/api/v1/events*`), duration/kWh formatting. |
 | `Discover.kt` | UDP broadcast discovery, then a parallel /24 scan as fallback. |
 | `HostAddr.kt` | Normalizes user input to `host:port` (default port 8088). |
 | `Settings.kt` | SharedPreferences: host, theme mode, temperature unit (°F default / °C; the Pi API stays °C and `Field.displayText` in `ApiModels.kt` converts), hidden fields. |
 | `Theme.kt` | Material 3 theme (System/Dark/Light). |
-| `ui/DashboardScreen.kt` | Grouped field cards and load graph. A tile is tappable when its field id matches an enabled registry setting's `field_id`. |
-| `ui/SettingsScreen.kt` | Field visibility, theme, temperature unit, host entry, and the "Inverter settings" list from the registry. |
+| `ui/DashboardScreen.kt` | Grouped field cards and the shared load graph (used by the Graph tab). A tile is tappable when its field id matches an enabled registry setting's `field_id`. |
+| `ui/GraphScreen.kt` | Graph tab: load-% history plus a charge / idle / discharge state track. |
+| `ui/SettingsScreen.kt` | Field visibility, theme, temperature unit, host entry, the "Inverter settings" list from the registry, and log access. |
+| `ui/LogScreen.kt` | Read-only viewer for the Pi charge-controller and write logs. |
 | `ui/SettingEditor.kt` | Edit dialog: pick from the Pi-supplied options, confirm, write, show the readback. |
 | `ui/SearchScreen.kt` | LAN search results. |
 | `ui/EventsScreen.kt` | Events tab: tracker cards with live timer, history list, create/edit form, long-press menu (edit, pause/resume, reset and delete with confirmation). |
